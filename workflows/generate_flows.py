@@ -17,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import exputil
 
-from spectrum_management.beam_mapping import beam_mapping
+from spectrum_management.beam_mapping import POLICY_NAMES, beam_mapping
 from utils.cells import read_cells
 from utils.ground_stations import read_ground_stations_extended
 from utils.tles import read_tles
@@ -233,7 +233,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("flow_time_s", type=int, help="Simulation time (seconds) for the snapshot.")
     parser.add_argument(
         "beam_policy",
-        choices=["greedy-uncoordinated", "greedy-coordinated", "greedy-coordinated-inr-aware", "greedy-uncoordinated-inr-aware"],
+        choices=POLICY_NAMES,
         help="Beam-mapping policy to use.",
     )
     parser.add_argument(

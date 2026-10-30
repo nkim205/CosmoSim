@@ -20,12 +20,14 @@ import numpy as np
 from networkx.algorithms.flow import max_flow_min_cost
 
 import utils.global_variables as global_vars
+from spectrum_management.beam_mapping import NEW_POLICIES
 from traffic_engineering.hot_potato import hot_potato_modifications
 from utils.ground_stations import read_ground_stations_extended
 from utils.tles import read_tles
 CONSTELLATION_ROOT = PROJECT_ROOT / "constellation_configurations" / "configs"
 GROUNDSTATION_ROOT = PROJECT_ROOT / "inputs" / "groundstations"
 CELLS_ROOT = PROJECT_ROOT / "inputs" / "cells"
+CAPACITY_BEAM_POLICIES = ["greedy-uncoordinated", "greedy-coordinated"] + list(NEW_POLICIES)
 
 
 def read_properties(path: Path) -> Dict[str, str]:
@@ -154,7 +156,7 @@ def generate_capacities(
     if not terminals_file.exists():
         raise FileNotFoundError(f"Terminal allocation file not found: {terminals_file}")
     validate_country(country)
-    if beam_policy not in {"greedy-uncoordinated", "greedy-coordinated"}:
+    if beam_policy not in CAPACITY_BEAM_POLICIES:
         raise ValueError("Beam policy must match CosmoSim beam mapping choices.")
 
     demands_base = resolve_path(demands_dir) if demands_dir is not None else output_dir
@@ -338,7 +340,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("flow_time_s", type=int, help="Simulation time (seconds) for the snapshot.")
     parser.add_argument(
         "beam_policy",
-        choices=["greedy-uncoordinated", "greedy-coordinated"],
+        choices=CAPACITY_BEAM_POLICIES,
         help="Beam-mapping policy used when generating demands (for bookkeeping).",
     )
     parser.add_argument(

@@ -1,0 +1,2 @@
+# Append-only team results log: keep everyone's rows when merging instead of conflicting.
+results/results_log.csv merge=union
