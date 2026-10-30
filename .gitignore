@@ -1,5 +1,10 @@
 # Large population rasters
 terminal_deployment/terminals/*
+# Shared project inputs (uniform files use unseeded randomness, so everyone must use these exact copies)
+!terminal_deployment/terminals/cells_haiti_0_1000_uniform.txt
+!terminal_deployment/terminals/cells_haiti_0_1000_population.txt
+!terminal_deployment/terminals/cells_haiti_0_10000_uniform.txt
+!terminal_deployment/terminals/cells_haiti_0_10000_population.txt
 
 # Kontur downloads placeholder
 inputs/shp_files/*
@@ -13,7 +18,7 @@ __pycache__/
 # Generated data outputs and plots
 data/
 graph_generation/graphs/
-terminal_deployment/terminals/
+logs/
 plotting_scripts/out/
 inputs/**/*.gpkg
 inputs/**/*.shp
@@ -21,3 +26,7 @@ inputs/**/*.shx
 inputs/**/*.dbf
 inputs/**/*.prj
 inputs/**/*.cpg
+
+/resources/*
+
+.venv/*

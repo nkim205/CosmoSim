@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Mapping, Sequence
+from typing import Callable, Dict, Iterable, Mapping, Sequence
 
 from .common import normalize_satellite_list, prepare_cells
 from .greedy_coordinated import assign_beams as assign_greedy_coordinated
 from .greedy_uncoordinated import assign_beams as assign_greedy_uncoordinated
 from .greedy_coordinated_inr_aware import assign_beams as assign_greedy_coordinated_inr_aware
 from .greedy_uncoordinated_inr_aware import assign_beams as assign_greedy_uncoordinated_inr_aware
+from .equal_rf import assign_beams as assign_equal_rf
+
+ORIGINAL_POLICIES = [
+    "greedy-uncoordinated",
+    "greedy-coordinated",
+    "greedy-coordinated-inr-aware",
+    "greedy-uncoordinated-inr-aware",
+]
+
+# Project policies. Each takes the same arguments as greedy_coordinated.assign_beams:
+# (prepared_cells, satellites, satellite_cells, cell_satellites, config,
+#  shell_satellite_indices, users_per_channel, cell_population) -> {"<cell>_<ch>": "<color>_<sat>_<ch>"}
+NEW_POLICIES: Dict[str, Callable[..., Dict[str, str]]] = {
+    "equal-rf": assign_equal_rf,
+}
+
+POLICY_NAMES = ORIGINAL_POLICIES + list(NEW_POLICIES)
 
 def beam_mapping(
     policy: str,
@@ -67,11 +84,19 @@ def beam_mapping(
                 users_per_channel,
                 cell_population,
             )
-    else:
-        raise ValueError(
-            "Unsupported beam-mapping policy. Expected 'greedy-uncoordinated', "
-            "'greedy-coordinated', 'greedy-coordinated-inr-aware', or 'greedy-uncoordinated-inr-aware'."
+    elif normalized_policy in NEW_POLICIES:
+        mapping = NEW_POLICIES[normalized_policy](
+            prepared_cells,
+            sat_list,
+            satellite_cells,
+            cell_satellites,
+            config,
+            shell_satellite_indices,
+            users_per_channel,
+            cell_population,
         )
+    else:
+        raise ValueError(f"Unsupported beam-mapping policy '{policy}'. Expected one of: {', '.join(POLICY_NAMES)}.")
 
     print(
         f"[beam-mapping] policy={normalized_policy} cells={len(prepared_cells)} "

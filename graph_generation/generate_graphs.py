@@ -206,6 +206,7 @@ def generate_all_graphs(
     dynamic_state_update_interval_ms: int,
     simulation_start_time_s: int,
     simulation_end_time_s: int,
+    include_global_cells: bool = True,
 ):
     print(
         f"Generating graphs for '{constellation_config}' ({country}) "
@@ -236,7 +237,8 @@ def generate_all_graphs(
     list_isls = read_isls(str(isls_path), len(satellites))
     epoch = tles["epoch"]
     cells = read_cells(str(cells_file))
-    starlink_cells = read_cells_starlink(str(starlink_cells_path))
+    # Global res-3 cells are only consumed by generate_capacities_competing_traffic.py.
+    starlink_cells = read_cells_starlink(str(starlink_cells_path)) if include_global_cells else []
     description = exputil.PropertiesConfig(str(description_path))
 
     simulation_start_time_ns = simulation_start_time_s * 1_000_000_000
@@ -396,6 +398,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Additional directory to search for constellation outputs (may be repeated).",
     )
     parser.add_argument(
+        "--skip-global-cells",
+        action="store_true",
+        help=(
+            "Omit sat->cell edges for inputs/cells/starlink_cells.txt (global res-3 cells). "
+            "Only the competing-traffic workflow reads them; write such graphs to a separate --graphs-dir."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the planned generation info without creating graphs.",
@@ -490,6 +500,7 @@ def main() -> None:
             update_interval_ms,
             simulation_start,
             simulation_end,
+            include_global_cells=not args.skip_global_cells,
         )
         elapsed = time.time() - start_time
         print(f"Finished generating graphs in {output_dir} (elapsed {elapsed:.1f}s).")
