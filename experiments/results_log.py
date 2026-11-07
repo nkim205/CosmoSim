@@ -39,12 +39,14 @@ SHOW_COLUMNS = {  # column -> header in `show`
 
 
 def short_scenario(name: str) -> str:
-    """cells_haiti_0_10000_population -> 10k-pop"""
+    """cells_haiti_0_10000_population -> 10k-pop; ..._hotspot_pap -> 10k-hotspot-pap."""
     parts = name.replace("cells_haiti_0_", "").split("_")
-    if len(parts) == 2 and parts[0].isdigit():
+    if len(parts) >= 2 and parts[0].isdigit():
         n = int(parts[0])
         size = f"{n // 1000}k" if n % 1000 == 0 else str(n)
-        return f"{size}-{'pop' if parts[1] == 'population' else parts[1]}"
+        kind = "-".join(parts[1:])
+        kind = {"population": "pop", "uniform": "uniform"}.get(kind, kind)
+        return f"{size}-{kind}"
     return name
 
 
@@ -57,12 +59,12 @@ def summarize(exp_dir: Path) -> list[dict]:
     manifest = json.loads((exp_dir / "manifest.json").read_text())
     with (exp_dir / "summary.csv").open() as fh:
         rows = list(csv.DictReader(fh))
-    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    groups: dict[tuple[str, str, float, float], list[dict]] = defaultdict(list)
     for r in rows:
-        groups[(r["scenario"], r["policy"])].append(r)
+        groups[(r["scenario"], r["policy"], float(r["isl_scale"]), float(r["gw_scale"]))].append(r)
 
     out = []
-    for (scenario, policy), rs in sorted(groups.items()):
+    for (scenario, policy, _, _), rs in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], -kv[0][2], -kv[0][3])):
         mean = lambda k: sum(float(r[k]) for r in rs) / len(rs)  # noqa: E731
         req, adm, dl, st = (mean(k) for k in ("requested_mbps", "admitted_mbps", "delivered_mbps", "stranded_mbps"))
         out.append({

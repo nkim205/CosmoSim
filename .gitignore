@@ -5,6 +5,10 @@ terminal_deployment/terminals/*
 !terminal_deployment/terminals/cells_haiti_0_1000_population.txt
 !terminal_deployment/terminals/cells_haiti_0_10000_uniform.txt
 !terminal_deployment/terminals/cells_haiti_0_10000_population.txt
+!terminal_deployment/terminals/cells_haiti_0_10000_hotspot_pap.txt
+!terminal_deployment/terminals/cells_haiti_0_10000_hotspot_north.txt
+!terminal_deployment/terminals/cells_haiti_0_5000_wide_*.txt
+!terminal_deployment/terminals/cells_haiti_0_5000_wide_shift.schedule
 
 # Kontur downloads placeholder
 inputs/shp_files/*

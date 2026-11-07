@@ -10,6 +10,7 @@ from .greedy_uncoordinated import assign_beams as assign_greedy_uncoordinated
 from .greedy_coordinated_inr_aware import assign_beams as assign_greedy_coordinated_inr_aware
 from .greedy_uncoordinated_inr_aware import assign_beams as assign_greedy_uncoordinated_inr_aware
 from .equal_rf import assign_beams as assign_equal_rf
+from .demand_proportional import assign_beams as assign_demand_proportional
 
 ORIGINAL_POLICIES = [
     "greedy-uncoordinated",
@@ -23,6 +24,7 @@ ORIGINAL_POLICIES = [
 #  shell_satellite_indices, users_per_channel, cell_population) -> {"<cell>_<ch>": "<color>_<sat>_<ch>"}
 NEW_POLICIES: Dict[str, Callable[..., Dict[str, str]]] = {
     "equal-rf": assign_equal_rf,
+    "demand-proportional": assign_demand_proportional,
 }
 
 POLICY_NAMES = ORIGINAL_POLICIES + list(NEW_POLICIES)

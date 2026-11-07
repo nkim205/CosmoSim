@@ -10,6 +10,9 @@ This package tracks the beam-management experiments that sit between terminal pl
 | `greedy_coordinated.py` | Coordinated variant that balances assignments across shells and honors user-priority heuristics. |
 | `greedy_uncoordinated_inr_aware.py` | INR-aware variant of the greedy-uncoordinated policy that verifies aggregate $I/N$ on all cells receiving a particular channel against a specified threshold before accepting a beam assignment. |
 | `greedy_coordinated_inr_aware.py` | INR-aware variant of the greedy-coordinated policy that verifies aggregate $I/N$ on all cells receiving a particular channel against a specified threshold before accepting a beam assignment. |
+| `equal_rf.py` | Project baseline: equal RF allocation. Ignores demand; round-robin, one more channel per cell per pass. |
+| `demand_proportional.py` | Project baseline: greedy-coordinated's total channel count, split by each cell's terminal share (largest remainder, cap 8). Ignores network state. |
+| `validate_mapping.py` | Checks a mapping against the allocation rules (channel range, visibility, unique beams, co-channel). Used by `experiments/run_experiment.py`. |
 
 ## Input and Output Contract
 
@@ -41,7 +44,7 @@ Algorithms should only mutate their local state and return the mapping; all logg
 ## Adding a New Beam-Management Algorithm
 
 1. Create a module (e.g., `my_policy.py`) inside `spectrum_management/` and implement `assign_beams` with the signature above. Reuse helpers from `common.py` such as `initialize_beam_state`, `candidate_sats`, or `coordinated_priorities` when possible.
-2. Register the policy in `beam_mapping.py` by importing your `assign_beams` function and extending the dispatcher to recognize a new policy string.
+2. Register the policy in `beam_mapping.py` by importing your `assign_beams` function and adding it to `NEW_POLICIES`. The workflows and `experiments/run_experiment.py` then accept the name.
 3. Document any configuration knobs or assumptions inside the module and ensure the function returns the mapping described above.
 4. Update any scripts or configs that reference beam policies so they can opt into the new identifier.
 

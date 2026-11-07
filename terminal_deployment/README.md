@@ -7,7 +7,8 @@ This package owns every step required to turn population rasters into per-cell t
 | Component | Purpose |
 | --- | --- |
 | `generate_cell_allocations.py` | Entry point for producing terminal layouts from inputs/cells rasters and distribution configs. |
-| `terminals/` | Gitignored cache of generated allocation files (`cells_<country>_0_<pop>_<distribution>[_<cap>][_ku].txt`). |
+| `generate_hotspots.py` | Project script: writes the Haiti hotspot files (`cells_haiti_0_10000_hotspot_*`, `cells_haiti_0_5000_wide_*`) and the shifting schedule `cells_haiti_0_5000_wide_shift.schedule`. |
+| `terminals/` | Generated allocation files (`cells_<country>_0_<pop>_<distribution>[_<cap>][_ku].txt`). Gitignored, except the shared Haiti project files listed in `.gitignore`. |
 | `command_logs/` | Run logs emitted by the generator scripts for reproducibility. |
 
 ## Input Expectations

@@ -1,5 +1,7 @@
 # CosmoSim
 
+> CS 4251/6250 project fork: start with [PROJECT_NOTES.md](PROJECT_NOTES.md) for setup, experiments, and baselines.
+
 CosmoSim is the an open-source simulator to model satellite network capacity released as part of the
 _Assessing LEO Satellite Networks for National Emergency Failover_ paper at IMC 2025.  The code
 bundled here is curated for public release: configuration generators, graph
