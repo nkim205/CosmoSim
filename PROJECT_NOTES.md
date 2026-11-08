@@ -102,11 +102,32 @@ To recompute every baseline from scratch: `./experiments/run_all_baselines.sh --
 Useful columns: `delivered_gbps` (throughput), `delivered_pct_of_requested` (demand satisfaction), `stranded_gbps`,
 `delivered_min_gbps` (worst second), `no_channel_cells` (starved cells), `rule_violations` (must be 0).
 
-Not available yet: fairness (Jain's index) and per-cell satisfaction after routing. Routing only reports totals per
-satellite (section 7).
+**PR1 evaluation pipeline** (switch methods without changing code):
 
-Per-second detail for plots: `data/runs/<name>/summary.csv` (local, not in git; rerun the experiment to get it).
-`manifest.json` in the same folder records the command, commit, and input checksums.
+```bash
+.venv/bin/python experiments/pr1_evaluation/run.py --list-methods
+.venv/bin/python experiments/pr1_evaluation/run.py --method 1 --matrix smoke   # Equal RF
+.venv/bin/python experiments/pr1_evaluation/run.py --method 2 --matrix pr1    # next method
+```
+
+See [`experiments/pr1_evaluation/README.md`](experiments/pr1_evaluation/README.md).
+
+**Evaluation metrics (PR1-aligned):** full audit table, formulas, and limitations are in
+[`analysis/METRICS.md`](analysis/METRICS.md). After each run: `metrics_<t>.json`; experiment:
+`metrics_summary.csv`. Recompute / validate:
+
+```bash
+.venv/bin/python analysis/validate_metrics.py
+.venv/bin/python analysis/collect_metrics.py data/runs/<name> --print
+```
+
+Headline fields for ablations: `delivered_gbps`, `demand_satisfaction` (delivered/offered), `jain_d`,
+`starve_deliv`, `gw_agg_util` / `feeder_util` / `isl_util` (+ `*_frac_sat90`), `cell_rf_fill` /
+`sat_rf_util`, `allocation_s`. Latency/queues are **unsupported** in CosmoSim. Per-cell delivery is an
+**estimate** (sat delivery ratio × cell admit). Use `allocation_s` for policy runtime, not `flows_s`.
+
+Per-second detail: `data/runs/<name>/summary.csv` and `metrics_summary.csv` (local, not in git).
+`manifest.json` records the command, commit, and input checksums.
 
 ## 5. Adding your own policy
 
@@ -190,7 +211,7 @@ What it shows:
 
 | Item | Owner |
 |---|---|
-| Per-cell delivered traffic (needed for fairness and per-cell satisfaction) | **Unassigned** |
+| Per-cell delivered traffic (needed for fairness and per-cell satisfaction) | **Done** (attributed from sat delivery ratios; see §4) |
 | Network state passed to policies | Algorithm group |
 | Is "shell 0 has no ISLs" intentional upstream? Our bottleneck finding relies on it. | Ask Prof. Saeed |
 | Latency, queues, loss | Not modeled by CosmoSim. Report as unsupported. |
@@ -211,7 +232,8 @@ What it shows:
 | Terminals | `terminal_deployment/generate_cell_allocations.py`, `generate_hotspots.py` | `terminal_deployment/terminals/cells_haiti_0_<N>_<kind>.txt` (cell, terminals) |
 | Graphs | `graph_generation/generate_graphs.py` | `graph_generation/graphs_noglobal/starlink_5shells/haiti/graph_<t_ns>.txt` (one per second) |
 | Beams + demand | `workflows/generate_flows.py` | `beam_assignments_<t_ns>.pkl`, `demands.txt` (admitted per satellite) |
-| Routing | `workflows/generate_capacities_scaled.py` | `max_flow_<t>.txt` (`time_ns,delivered_Mbps`) |
+| Routing | `workflows/generate_capacities_scaled.py` | `max_flow_<t>.txt`, `flow_dict_max_flow_<t>.json`, `edge_caps_max_flow_<t>.json` |
+| Metrics | `analysis/metrics.py` (auto from runner) | `metrics_<t>.json`, experiment `metrics_summary.csv` |
 
 One second by hand:
 ```bash

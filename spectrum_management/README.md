@@ -12,6 +12,7 @@ This package tracks the beam-management experiments that sit between terminal pl
 | `greedy_coordinated_inr_aware.py` | INR-aware variant of the greedy-coordinated policy that verifies aggregate $I/N$ on all cells receiving a particular channel against a specified threshold before accepting a beam assignment. |
 | `equal_rf.py` | Project baseline: equal RF allocation. Ignores demand; round-robin, one more channel per cell per pass. |
 | `demand_proportional.py` | Project baseline: greedy-coordinated's total channel count, split by each cell's terminal share (largest remainder, cap 8). Ignores network state. |
+| `scored_rf.py` | Project algorithm: one-channel-at-a-time scoring on unmet demand + fairness − shared gateway/ISL egress congestion. See [`ALGORITHM_OVERVIEW.md`](../ALGORITHM_OVERVIEW.md). |
 | `validate_mapping.py` | Checks a mapping against the allocation rules (channel range, visibility, unique beams, co-channel). Used by `experiments/run_experiment.py`. |
 
 ## Input and Output Contract

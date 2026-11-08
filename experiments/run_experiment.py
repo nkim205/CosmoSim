@@ -36,12 +36,23 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from analysis.metrics import compute_run_metrics, write_run_metrics  # noqa: E402
 from experiments.results_log import LOG, log_experiment, short_scenario  # noqa: E402
 from spectrum_management.beam_mapping import NEW_POLICIES  # noqa: E402
 from spectrum_management.validate_mapping import validate_mapping  # noqa: E402
 
 BUILTIN_POLICIES = ["greedy-coordinated", "greedy-uncoordinated"]
 RUNNABLE_POLICIES = BUILTIN_POLICIES + list(NEW_POLICIES)
+
+
+def _policy_capacity_aware(policy: str) -> bool:
+    """True if the policy's module sets CAPACITY_AWARE (needs per-scale beam assignment)."""
+    fn = NEW_POLICIES.get(policy)
+    if fn is None:
+        return False
+    mod = sys.modules.get(fn.__module__)
+    return bool(getattr(mod, "CAPACITY_AWARE", False))
+
 POLICY_GROUPS = {
     "baselines": ["greedy-coordinated", "greedy-uncoordinated", "equal-rf", "demand-proportional"],
     "all": RUNNABLE_POLICIES,
@@ -89,7 +100,16 @@ def parse_args() -> argparse.Namespace:
                    help="Multiply ISL capacity. Several values = a sweep (e.g. 1 0.5 0.25).")
     p.add_argument("--gw-scale", type=float, nargs="+", default=[1.0],
                    help="Multiply gateway feeder + ground-station capacity. Several values = a sweep.")
+    p.add_argument("--scored-rf-gamma", type=float, default=None,
+                   help="Override scored-rf congestion weight gamma for this run (e.g. 0.2, 0.5, 1.0).")
+    p.add_argument("--scored-rf-beta", type=float, default=None,
+                   help="Override scored-rf fairness weight beta (0 disables fairness; default is module BETA).")
+    p.add_argument("--scored-rf-use-gateway", type=int, choices=[0, 1], default=None,
+                   help="Override scored-rf gateway congestion awareness (1/0). Used by PR1 Methods 3/4.")
+    p.add_argument("--scored-rf-use-isl", type=int, choices=[0, 1], default=None,
+                   help="Override scored-rf ISL congestion awareness (1/0). Used by PR1 Methods 3/4.")
     p.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 2), help="Parallel runs.")
+
     p.add_argument("--overwrite", action="store_true", help="Delete an existing experiment folder and start over.")
     p.add_argument("--resume", action="store_true",
                    help="Continue an interrupted experiment: skip runs that already finished. Same command otherwise.")
@@ -110,6 +130,8 @@ def parse_args() -> argparse.Namespace:
         parts = [datetime.now().strftime("%m%d-%H%M%S"), typed_policies]
         parts += ["isl" + "+".join(f"{x:g}" for x in args.isl_scale)] if args.isl_scale != [1.0] else []
         parts += ["gw" + "+".join(f"{x:g}" for x in args.gw_scale)] if args.gw_scale != [1.0] else []
+        parts += [f"gamma{args.scored_rf_gamma:g}"] if args.scored_rf_gamma is not None else []
+        parts += [f"beta{args.scored_rf_beta:g}"] if args.scored_rf_beta is not None else []
         parts += ["quick"] if args.quick else []
         args.name = "_".join(parts)
     return args
@@ -172,42 +194,101 @@ def _beams_done(d: Path, t: int) -> bool:
         (d / "demands.txt").exists() and (d / f"beam_assignments_{t * 10**9}.pkl").exists()
 
 
-def run_unit(scenario: str, policy: str, t: int, scales: list[tuple[float, float]], base: Path, name: str) -> list[dict]:
-    """One scenario/policy/second: assign beams once, then route once per capacity setting.
+def run_unit(
+    scenario: str,
+    policy: str,
+    t: int,
+    scales: list[tuple[float, float]],
+    base: Path,
+    name: str,
+    scored_rf_gamma: float | None = None,
+    scored_rf_beta: float | None = None,
+    scored_rf_use_gateway: int | None = None,
+    scored_rf_use_isl: int | None = None,
+) -> list[dict]:
+    """One scenario/policy/second: assign beams, then route once per capacity setting.
 
-    Beam assignment does not depend on ISL or gateway capacity, so its output is copied to every
-    capacity setting's folder instead of being recomputed. Finished folders are skipped (--resume).
+    Capacity-oblivious policies assign beams once and reuse the mapping across scales.
+    Capacity-aware policies (CAPACITY_AWARE on the policy module, e.g. scored-rf) re-assign
+    beams at each (isl_scale, gw_scale) so congestion estimates match scaled routing.
+    Finished folders are skipped (--resume).
+
+    For scored-rf, seconds must be executed in increasing order per scale so fairness
+    history is causal; ``main`` runs capacity-aware timelines sequentially over ``t``.
     """
     tfile = terminal_file(scenario, t)
     py = sys.executable
     pkl = f"beam_assignments_{t * 10**9}.pkl"
     dirs = {(isl, gw): base / f"isl{isl:g}_gw{gw:g}" / f"t{t}" for isl, gw in scales}
-    flows = [py, "workflows/generate_flows.py", None, str(GRAPH_DIR), CONSTELLATION, GROUNDSTATIONS,
-             f"{tfile}.txt", COUNTRY, str(t), policy, KU_GBPS]
-
-    src = next((d for d in dirs.values() if _beams_done(d, t)), None)
-    flows_s = 0.0
-    if src is None:
-        src = dirs[scales[0]]
-        src.mkdir(parents=True, exist_ok=True)
-        flows[2] = str(src)
-        flows_s = _run(flows, src / "flows.log", f"beam assignment for {short_scenario(scenario)}/{policy}/t{t}")
-        (src / "flows.done").write_text("")
+    flows_base = [py, "workflows/generate_flows.py", None, str(GRAPH_DIR), CONSTELLATION, GROUNDSTATIONS,
+                  f"{tfile}.txt", COUNTRY, str(t), policy, KU_GBPS]
+    gamma_flags = ["--scored-rf-gamma", str(scored_rf_gamma)] if scored_rf_gamma is not None else []
+    beta_flags = ["--scored-rf-beta", str(scored_rf_beta)] if scored_rf_beta is not None else []
+    gw_aware_flags = (
+        ["--scored-rf-use-gateway", str(scored_rf_use_gateway)]
+        if scored_rf_use_gateway is not None else []
+    )
+    isl_aware_flags = (
+        ["--scored-rf-use-isl", str(scored_rf_use_isl)]
+        if scored_rf_use_isl is not None else []
+    )
+    weight_flags = gamma_flags + beta_flags + gw_aware_flags + isl_aware_flags
+    capacity_aware = _policy_capacity_aware(policy)
 
     terminals = {l.split(",")[0]: int(l.split(",")[1]) for l in (TERMINALS / f"{tfile}.txt").read_text().split()}
     with_terminals = [c for c, v in terminals.items() if v > 0]
-    mapping = pickle.loads((src / pkl).read_bytes())
-    problems = validate_mapping(mapping, visible_satellites(t, with_terminals), with_terminals)
-    served = {k.rsplit("_", 1)[0] for k in mapping}
-    admitted = float(np.atleast_1d(np.loadtxt(src / "demands.txt")).sum())
+    visible = visible_satellites(t, with_terminals)
+
+    shared_src: Path | None = None
+    shared_flows_s = 0.0
+    if not capacity_aware:
+        shared_src = next((d for d in dirs.values() if _beams_done(d, t)), None)
+        if shared_src is None:
+            shared_src = dirs[scales[0]]
+            shared_src.mkdir(parents=True, exist_ok=True)
+            flows = list(flows_base)
+            flows[2] = str(shared_src)
+            shared_flows_s = _run(
+                flows, shared_src / "flows.log",
+                f"beam assignment for {short_scenario(scenario)}/{policy}/t{t}",
+            )
+            (shared_src / "flows.done").write_text("")
 
     rows = []
     for (isl, gw), out in dirs.items():
         out.mkdir(parents=True, exist_ok=True)
-        if out != src and not _beams_done(out, t):
-            for f in ("demands.txt", pkl, "flows.log"):
-                shutil.copyfile(src / f, out / f)
-            (out / "flows.done").write_text(f"copied from {src.relative_to(base)}\n")
+        flows = list(flows_base)
+        flows[2] = str(out)
+        scale_flags = ["--isl-scale", str(isl), "--gw-scale", str(gw)] + weight_flags
+        flows_s = 0.0
+        scale_dir = out.parent  # .../islX_gwY
+        history_path = scale_dir / "scored_rf_history.json"
+
+        if capacity_aware:
+            if not _beams_done(out, t):
+                # Fresh timeline at t=0: never reuse a previous experiment's history.
+                if t == 0 and history_path.exists():
+                    history_path.unlink()
+                flows_s = _run(
+                    flows + scale_flags, out / "flows.log",
+                    f"beam assignment for {short_scenario(scenario)}/{policy}/"
+                    f"isl{isl:g}_gw{gw:g}/t{t}",
+                )
+                (out / "flows.done").write_text("")
+        else:
+            assert shared_src is not None
+            flows_s = shared_flows_s
+            if out != shared_src and not _beams_done(out, t):
+                for f in ("demands.txt", pkl, "flows.log"):
+                    shutil.copyfile(shared_src / f, out / f)
+                (out / "flows.done").write_text(f"copied from {shared_src.relative_to(base)}\n")
+            flows[2] = str(shared_src)
+
+        mapping = pickle.loads((out / pkl).read_bytes())
+        problems = validate_mapping(mapping, visible, with_terminals)
+        served = {k.rsplit("_", 1)[0] for k in mapping}
+        admitted = float(np.atleast_1d(np.loadtxt(out / "demands.txt")).sum())
+
         caps = [py, "workflows/generate_capacities_scaled.py", str(out), str(GRAPH_DIR), CONSTELLATION,
                 GROUNDSTATIONS, str(TERMINALS / f"{tfile}.txt"), COUNTRY, str(t), policy, KU_GBPS,
                 "--routing", "max_flow", "--duration", "1", "--isl-scale", str(isl), "--gw-scale", str(gw)]
@@ -215,11 +296,25 @@ def run_unit(scenario: str, policy: str, t: int, scales: list[tuple[float, float
         if not (out / "commands.txt").exists() or not (out / f"max_flow_{t}.txt").exists():
             caps_s = _run(caps, out / "capacities.log",
                           f"routing for {short_scenario(scenario)}/{policy}/isl{isl:g}_gw{gw:g}/t{t}")
-            flows[2] = str(src)
-            (out / "commands.txt").write_text(" ".join(flows) + "\n" + " ".join(caps) + "\n")
+            (out / "commands.txt").write_text(" ".join(flows + scale_flags) + "\n" + " ".join(caps) + "\n")
         if problems:
             (out / "rule_violations.txt").write_text("\n".join(problems) + "\n")
         delivered = float((out / f"max_flow_{t}.txt").read_text().split(",")[1])
+        allocation_s = None
+        try:
+            metrics = compute_run_metrics(
+                out,
+                t_s=t,
+                routing="max_flow",
+                terminals_path=TERMINALS / f"{tfile}.txt",
+                flows_s=round(flows_s, 2),
+                capacities_s=round(caps_s, 2),
+                rebuild_caps=True,
+            )
+            write_run_metrics(out, metrics, t_s=t)
+            allocation_s = metrics.get("runtime_allocation_s")
+        except Exception as exc:  # metrics must not fail the experiment
+            (out / f"metrics_{t}.error").write_text(f"{exc}\n")
         rows.append({
             "experiment": name, "scenario": scenario, "terminal_file": tfile, "policy": policy, "t_s": t,
             "isl_scale": isl, "gw_scale": gw,
@@ -229,6 +324,7 @@ def run_unit(scenario: str, policy: str, t: int, scales: list[tuple[float, float
             "cells_with_terminals": len(with_terminals),
             "cells_with_no_channel": sum(1 for c in with_terminals if c not in served),
             "rule_violations": len(problems),
+            "allocation_s": None if allocation_s is None else round(float(allocation_s), 4),
             "flows_s": round(flows_s, 2), "capacities_s": round(caps_s, 2),
         })
     return rows
@@ -268,26 +364,100 @@ def main() -> None:
     (exp / "git_diff.patch").write_text(git("diff"))
 
     scales = list(dict.fromkeys(itertools.product(args.isl_scale, args.gw_scale)))
-    units = [(s, p, t) for s in args.scenarios for p in args.policies for t in seconds]
-    total = len(units) * len(scales)
+    # Capacity-aware policies (fairness history) must run seconds in order per (scenario, policy).
+    # Other policies can still parallelize freely over seconds.
+    aware_timelines = [(s, p) for s in args.scenarios for p in args.policies if _policy_capacity_aware(p)]
+    plain_units = [
+        (s, p, t) for s in args.scenarios for p in args.policies for t in seconds
+        if not _policy_capacity_aware(p)
+    ]
+    total = (len(aware_timelines) * len(seconds) + len(plain_units)) * len(scales)
     print(f"Running {total} runs ({len(args.scenarios)} scenarios x {len(args.policies)} policies x "
           f"{len(scales)} capacity settings x {args.duration} s) with {args.jobs} parallel jobs -> data/runs/{args.name}")
+    if aware_timelines:
+        print(f"  ({len(aware_timelines)} capacity-aware timelines run seconds sequentially for fairness history)")
     rows, failures, t0, done = [], [], time.time(), 0
+
+    def _consume(fut, n_scale_runs: int) -> None:
+        nonlocal done
+        try:
+            rows.extend(fut.result())
+        except Exception as exc:  # keep going; report at the end
+            failures.append(str(exc))
+        done += n_scale_runs
+        if done % (50 * len(scales)) < len(scales) or done == total:
+            print(f"  {done}/{total} done ({time.time() - t0:.0f} s)", flush=True)
+
+    def _run_aware_timeline(scenario: str, policy: str) -> list[dict]:
+        timeline_rows: list[dict] = []
+        for t in seconds:
+            timeline_rows.extend(
+                run_unit(
+                    scenario, policy, t, scales, exp / scenario / policy, args.name,
+                    args.scored_rf_gamma, args.scored_rf_beta,
+                    args.scored_rf_use_gateway, args.scored_rf_use_isl,
+                )
+            )
+        return timeline_rows
+
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [pool.submit(run_unit, s, p, t, scales, exp / s / p, args.name) for s, p, t in units]
-        for fut in futures:
+        futures = []
+        for s, p in aware_timelines:
+            futures.append((pool.submit(_run_aware_timeline, s, p), len(seconds) * len(scales)))
+        for s, p, t in plain_units:
+            futures.append((
+                pool.submit(
+                    run_unit, s, p, t, scales, exp / s / p, args.name,
+                    args.scored_rf_gamma, args.scored_rf_beta,
+                    args.scored_rf_use_gateway, args.scored_rf_use_isl,
+                ),
+                len(scales),
+            ))
+        for fut, n in futures:
+            _consume(fut, n)
+
+    # On --resume, merge with any rows already written by a prior invocation of this folder
+    # (e.g. PR1 pipeline appending scenario cases into one experiment name).
+    if args.resume and (exp / "summary.csv").exists():
+        with (exp / "summary.csv").open(newline="") as fh:
+            prior = list(csv.DictReader(fh))
+        key_of = lambda r: (r["scenario"], r["policy"], float(r["isl_scale"]), float(r["gw_scale"]), int(float(r["t_s"])))
+        seen = {key_of(r) for r in rows}
+        for r in prior:
+            # DictReader values are strings; normalize types used in sort/key.
             try:
-                rows.extend(fut.result())
-            except Exception as exc:  # keep going; report at the end
-                failures.append(str(exc))
-            done += len(scales)
-            if done % (50 * len(scales)) < len(scales) or done == total:
-                print(f"  {done}/{total} done ({time.time() - t0:.0f} s)", flush=True)
+                rr = {
+                    **r,
+                    "isl_scale": float(r["isl_scale"]),
+                    "gw_scale": float(r["gw_scale"]),
+                    "t_s": int(float(r["t_s"])),
+                    "requested_mbps": float(r["requested_mbps"]),
+                    "admitted_mbps": float(r["admitted_mbps"]),
+                    "delivered_mbps": float(r["delivered_mbps"]),
+                    "stranded_mbps": float(r["stranded_mbps"]),
+                    "channels": int(float(r["channels"])),
+                    "cells_with_terminals": int(float(r["cells_with_terminals"])),
+                    "cells_with_no_channel": int(float(r["cells_with_no_channel"])),
+                    "rule_violations": int(float(r["rule_violations"])),
+                    "flows_s": float(r["flows_s"]),
+                    "capacities_s": float(r["capacities_s"]),
+                }
+                if "allocation_s" in r and r["allocation_s"] not in ("", None):
+                    rr["allocation_s"] = float(r["allocation_s"])
+                elif "allocation_s" in (rows[0] if rows else {}):
+                    rr["allocation_s"] = None
+            except (KeyError, ValueError):
+                continue
+            if key_of(rr) not in seen:
+                rows.append(rr)
+                seen.add(key_of(rr))
 
     rows.sort(key=lambda r: (r["scenario"], r["policy"], -r["isl_scale"], -r["gw_scale"], r["t_s"]))
     if rows:
+        # Union of fieldnames if resumed rows differ slightly.
+        fields = list(dict.fromkeys(k for r in rows for k in r.keys()))
         with (exp / "summary.csv").open("w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+            writer = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
 
@@ -303,6 +473,13 @@ def main() -> None:
               f"{m('delivered_mbps'):9.1f} {m('stranded_mbps'):9.1f} "
               f"{np.mean([r['cells_with_no_channel'] for r in rs]):11.1f} {sum(r['rule_violations'] for r in rs):10d}")
     print(f"\nPer-second table: data/runs/{args.name}/summary.csv")
+    try:
+        from analysis.collect_metrics import collect_experiment, write_summary_csv
+        mrows = collect_experiment(exp, rebuild_caps=True)
+        write_summary_csv(exp / "metrics_summary.csv", mrows)
+        print(f"Evaluation metrics: data/runs/{args.name}/metrics_summary.csv ({len(mrows)} runs)")
+    except Exception as exc:
+        print(f"Warning: metrics collection failed: {exc}")
 
     violations = sum(r["rule_violations"] for r in rows)
     if violations:

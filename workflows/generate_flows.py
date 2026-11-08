@@ -8,6 +8,7 @@ import json
 import math
 import pickle
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence
 
@@ -95,6 +96,12 @@ def generate_flows(
     flow_time_s: int,
     beam_policy: str,
     ku_band_capacity_gbps: float,
+    isl_scale: float = 1.0,
+    gw_scale: float = 1.0,
+    scored_rf_gamma: float | None = None,
+    scored_rf_beta: float | None = None,
+    scored_rf_use_gateway: bool | None = None,
+    scored_rf_use_isl: bool | None = None,
 ) -> Path:
     output_dir = resolve_path(output_dir)
     graph_dir = resolve_path(graph_dir)
@@ -161,6 +168,33 @@ def generate_flows(
         f"{satellite_count} satellites for {constellation_name}/{country} (t={flow_time_s}s)."
     )
     global_vars.current_simulation_time_s = flow_time_s
+    # Capacity-aware policies (e.g. scored-rf) read these to match generate_capacities_scaled.
+    global_vars.isl_scale = float(isl_scale)
+    global_vars.gw_scale = float(gw_scale)
+    if scored_rf_gamma is not None:
+        global_vars.scored_rf_gamma = float(scored_rf_gamma)
+    if scored_rf_beta is not None:
+        global_vars.scored_rf_beta = float(scored_rf_beta)
+    if scored_rf_use_gateway is not None:
+        global_vars.scored_rf_use_gateway = bool(scored_rf_use_gateway)
+    if scored_rf_use_isl is not None:
+        global_vars.scored_rf_use_isl = bool(scored_rf_use_isl)
+    # Cross-second fairness history for scored-rf (shared across t* under the same scale dir).
+    policy_norm = beam_policy.replace("_", "-").lower()
+    if policy_norm == "scored-rf" or policy_norm.startswith("scored-rf-"):
+        hist_path = output_dir.parent / "scored_rf_history.json"
+        global_vars.scored_rf_history_path = str(hist_path)
+        # Always reload from this scale dir's file (isolated per policy/scale; fresh process
+        # per second). Unit tests inject history by calling assign_beams directly.
+        if hist_path.exists():
+            with hist_path.open() as fh:
+                payload = json.load(fh)
+            satisfaction = payload.get("satisfaction", payload) if isinstance(payload, dict) else {}
+            global_vars.scored_rf_history = {str(k): float(v) for k, v in satisfaction.items()}
+        else:
+            global_vars.scored_rf_history = {}
+    # Wall time for the RF allocation / beam-mapping algorithm only (not graph I/O).
+    alloc_t0 = time.perf_counter()
     mapping = beam_mapping(
         beam_policy,
         cells,
@@ -172,7 +206,10 @@ def generate_flows(
         users_per_channel,
         cell_population,
     )
-    
+    allocation_runtime_s = time.perf_counter() - alloc_t0
+    (output_dir / "allocation_runtime_s.txt").write_text(f"{allocation_runtime_s:.6f}\n")
+    print(f"[info] Beam allocation runtime: {allocation_runtime_s:.4f}s")
+
     beam_assignments_path = output_dir / f"beam_assignments_{timestamp}.pkl"
     with beam_assignments_path.open("wb") as fh:
         pickle.dump(mapping, fh)
@@ -241,11 +278,55 @@ def parse_args() -> argparse.Namespace:
         type=float,
         help="Available KU-band capacity per beam in Gbps (e.g., 1.28).",
     )
+    parser.add_argument(
+        "--isl-scale",
+        type=float,
+        default=1.0,
+        help="Multiply ISL capacities for capacity-aware beam policies (default 1.0).",
+    )
+    parser.add_argument(
+        "--gw-scale",
+        type=float,
+        default=1.0,
+        help="Multiply gateway feeder + GS capacities for capacity-aware beam policies (default 1.0).",
+    )
+    parser.add_argument(
+        "--scored-rf-gamma",
+        type=float,
+        default=None,
+        help="Override scored-rf congestion weight gamma (default: module GAMMA).",
+    )
+    parser.add_argument(
+        "--scored-rf-beta",
+        type=float,
+        default=None,
+        help="Override scored-rf fairness weight beta (0 disables fairness; default: module BETA).",
+    )
+    parser.add_argument(
+        "--scored-rf-use-gateway",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Override scored-rf gateway congestion awareness (1/0). PR1 Methods 3/4.",
+    )
+    parser.add_argument(
+        "--scored-rf-use-isl",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Override scored-rf ISL congestion awareness (1/0). PR1 Methods 3/4.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    # Avoid leaking history across sequential CLI invocations in the same process.
+    if hasattr(global_vars, "scored_rf_history"):
+        delattr(global_vars, "scored_rf_history")
+    for attr in ("scored_rf_use_gateway", "scored_rf_use_isl", "scored_rf_gamma", "scored_rf_beta"):
+        if hasattr(global_vars, attr):
+            delattr(global_vars, attr)
     demands_path = generate_flows(
         args.output_dir,
         args.graph_dir,
@@ -256,6 +337,12 @@ def main() -> None:
         args.flow_time_s,
         args.beam_policy,
         args.ku_band_capacity,
+        isl_scale=args.isl_scale,
+        gw_scale=args.gw_scale,
+        scored_rf_gamma=args.scored_rf_gamma,
+        scored_rf_beta=args.scored_rf_beta,
+        scored_rf_use_gateway=(None if args.scored_rf_use_gateway is None else bool(args.scored_rf_use_gateway)),
+        scored_rf_use_isl=(None if args.scored_rf_use_isl is None else bool(args.scored_rf_use_isl)),
     )
     print(f"Wrote demands to {demands_path}")
 

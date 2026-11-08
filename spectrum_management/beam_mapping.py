@@ -11,6 +11,7 @@ from .greedy_coordinated_inr_aware import assign_beams as assign_greedy_coordina
 from .greedy_uncoordinated_inr_aware import assign_beams as assign_greedy_uncoordinated_inr_aware
 from .equal_rf import assign_beams as assign_equal_rf
 from .demand_proportional import assign_beams as assign_demand_proportional
+from .scored_rf import assign_beams as assign_scored_rf
 
 ORIGINAL_POLICIES = [
     "greedy-uncoordinated",
@@ -25,6 +26,7 @@ ORIGINAL_POLICIES = [
 NEW_POLICIES: Dict[str, Callable[..., Dict[str, str]]] = {
     "equal-rf": assign_equal_rf,
     "demand-proportional": assign_demand_proportional,
+    "scored-rf": assign_scored_rf,
 }
 
 POLICY_NAMES = ORIGINAL_POLICIES + list(NEW_POLICIES)
