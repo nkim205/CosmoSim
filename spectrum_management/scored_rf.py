@@ -285,11 +285,12 @@ def _contrib_to_sat(num_terminals: int, sats: Sequence[int], sat: int) -> float:
     return total
 
 
-def _congestion(sat: int, additional_mbps: float, egress: SharedEgress) -> float:
+def _congestion(sat: int, additional_mbps: float, egress: SharedEgress, residual: Optional[float]) -> float:
     """C = 1 - min(1, residual / additional) using shared residuals."""
     if additional_mbps <= 0:
         return 0.0
-    residual, _ = egress.best_egress(sat)
+    if residual is None:
+        residual, _ = egress.best_egress(sat)
     if residual == float("inf"):
         return 0.0
     return 1.0 - min(1.0, max(0.0, residual) / additional_mbps)
@@ -448,6 +449,8 @@ def assign_beams(
 
         f_scores = fairness_scores(terminals, cell_sats, history) if beta != 0 else {}
         best: Optional[Tuple[float, str, int, str, str]] = None
+        # cache egress residuals per alloc iteration
+        egress_residual_cache: Dict[int, float] = {}
 
         for cell_id, n_term in terminals.items():
             old_sats = cell_sats[cell_id]
@@ -470,8 +473,12 @@ def assign_beams(
                 additional = _contrib_to_sat(n_term, new_sats, sat) - _contrib_to_sat(n_term, old_sats, sat)
 
                 congestion = 0.0
-                if egress is not None and gamma != 0:
-                    congestion = _congestion(sat, additional, egress)
+                if egress is not None and gamma != 0 and additional > 0:
+                    if sat not in egress_residual_cache:
+                        residual, _ = egress.best_egress(sat)
+                        egress_residual_cache[sat] = residual
+
+                    congestion = _congestion(sat, additional, egress, residual=egress_residual_cache[sat],)
 
                 score = ALPHA * d_norm + beta * fairness - gamma * congestion
                 key = (score, unmet[cell_id], fairness, cell_id, -sat)
