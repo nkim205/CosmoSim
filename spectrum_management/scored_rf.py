@@ -40,7 +40,7 @@ from utils import global_variables as global_vars
 from .common import candidate_sats, initialize_beam_state
 from .constants import MAX_CHANNELS_PER_CELL
 from .greedy_coordinated import _order_satellites
-from .interference import check_interference
+from utils.h3_compat import k_ring
 
 # Weights from the project sketch.
 ALPHA = 0.5
@@ -350,11 +350,44 @@ def fairness_scores(
     return {cid: underservice[cid] / max_u for cid in terminals}
 
 
+class _InterferenceIndex:
+    """Incremental co-channel index local to one scored-RF allocation run.
+
+    Keeps exact existing interference semantics while avoiding repeated
+    string parsing, mapping scans, and H3 neighborhood calculations.
+    """
+
+    def __init__(self) -> None:
+        self.cell_channels: Dict[str, Set[int]] = defaultdict(set)
+        self.cell_sat_channels: Dict[str, Set[Tuple[int, int]]] = defaultdict(set)
+        self.neighbors: Dict[str, Set[str]] = {}
+
+    def feasible(self, cell: str, sat: int, beam_idx: int) -> bool:
+        # The original rule disallows this beam channel anywhere in this cell.
+        if beam_idx in self.cell_channels[cell]:
+            return False
+        neighbors = self.neighbors.get(cell)
+        if neighbors is None:
+            neighbors = set(k_ring(cell, 1))
+            self.neighbors[cell] = neighbors
+        # The original rule also disallows identical satellite/channel pairs
+        # in the cell's 1-ring (which includes the cell itself).
+        for neighbor in neighbors:
+            if (sat, beam_idx) in self.cell_sat_channels.get(neighbor, ()):
+                return False
+        return True
+
+    def add(self, cell: str, sat: int, beam_idx: int) -> None:
+        self.cell_channels[cell].add(beam_idx)
+        self.cell_sat_channels[cell].add((sat, beam_idx))
+
+
 def _find_assignment(
     cell_id: str,
     sat: int,
     mapping: Mapping[str, str],
     beams_available: Set[str],
+    interference_index: _InterferenceIndex,
 ) -> Optional[Tuple[str, str]]:
     """Return (dummy_key, beam_id) for the first feasible channel/color on this sat, else None."""
     for channel_idx in range(MAX_CHANNELS_PER_CELL):
@@ -363,7 +396,7 @@ def _find_assignment(
             continue
         for freq in range(global_vars.spatial_channel_reuse_factor):
             beam_id = f"{freq}_{sat}_{channel_idx}"
-            if beam_id in beams_available and check_interference(cell_id, mapping, beam_id):
+            if beam_id in beams_available and interference_index.feasible(cell_id, sat, channel_idx):
                 return dummy, beam_id
     return None
 
@@ -389,6 +422,7 @@ def assign_beams(
     terminals = {str(cell["cell"]): int(cell["num_terminals"]) for cell in prepared_cells}
     beams_available, sat_cells_assigned = initialize_beam_state(satellites)
     mapping: Dict[str, str] = {}
+    interference_index = _InterferenceIndex()
     cell_sats: Dict[str, List[int]] = {cid: [] for cid in terminals}
     sat_load: Dict[int, float] = defaultdict(float)
     num_shells = len(shell_satellite_indices)
@@ -428,7 +462,7 @@ def assign_beams(
                 num_shells,
             )
             for sat in candidates:
-                found = _find_assignment(cell_id, sat, mapping, beams_available)
+                found = _find_assignment(cell_id, sat, mapping, beams_available, interference_index)
                 if found is None:
                     continue
                 dummy, beam_id = found
@@ -467,6 +501,7 @@ def assign_beams(
                 egress.set_sat_load(s, sat_load[s])
         cell_sats[cell_id] = new_sats
         mapping[dummy] = beam_id
+        interference_index.add(cell_id, sat, int(beam_id.rsplit("_", 1)[1]))
         beams_available.remove(beam_id)
         sat_cells_assigned.setdefault(sat, []).append(cell_id)
 
