@@ -146,10 +146,7 @@ Per-second detail: `data/runs/<name>/summary.csv` and `metrics_summary.csv` (loc
 Each channel admits `min(terminals_on_it x 100, 1280)` Mbps, so extra channels beyond what a cell's terminals need add
 nothing.
 
-**Limitation:** a policy does not receive network state (gateway or ISL capacity, or past seconds). If yours needs it,
-read the current second from `utils.global_variables.current_simulation_time_s` and load
-`graph_generation/graphs_noglobal/starlink_5shells/haiti/graph_<t*10**9>.txt` (pickled NetworkX DiGraph: satellites
-0-6363, ground stations 6364+, cells are H3 strings). Each satellite can send at most 20.8 Gbps to the ground.
+The standard beam policy arguments describe RF visibility and demand. `scored-rf` also receives the current graph and prior estimated delivery history from the workflow. Each satellite can send at most 20.8 Gbps to the ground at nominal capacity.
 
 ## 6. Baselines and results
 
@@ -212,7 +209,7 @@ What it shows:
 | Item | Owner |
 |---|---|
 | Per-cell delivered traffic (needed for fairness and per-cell satisfaction) | **Done** (attributed from sat delivery ratios; see §4) |
-| Network state passed to policies | Algorithm group |
+| Network state passed to `scored-rf` | Done |
 | Is "shell 0 has no ISLs" intentional upstream? Our bottleneck finding relies on it. | Ask Prof. Saeed |
 | Latency, queues, loss | Not modeled by CosmoSim. Report as unsupported. |
 

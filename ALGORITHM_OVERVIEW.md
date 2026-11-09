@@ -30,7 +30,7 @@ Higher score wins. Demand and fairness raise the score; congestion lowers it.
 ### Main loop (one simulated second)
 
 1. CosmoSim calls `assign_beams(...)` with cells, visibility, free beams, shells.
-2. Load the Haiti graph for that second; if γ ≠ 0 and gateway and/or ISL awareness is on, build a **shared egress residual** pool (scaled by `--gw-scale` / `--isl-scale`).
+2. Use the graph passed by the flow workflow. If γ ≠ 0 and congestion awareness is on, build a **shared egress residual** pool for the current snapshot and capacity scales.
 3. Repeat until unmet demand is gone or no legal assignment remains:
    - Recompute unmet demand and **re-normalize D**; if β ≠ 0, also **recompute F** from updated channel counts + history
    - Consider only **legal** candidates: the sat must be visible to the cell, a free beam/channel must exist, and CosmoSim interference checks must pass
@@ -52,7 +52,7 @@ How much of a cell’s **offered** traffic still cannot be **admitted** given ch
 
 ### F — fairness
 
-**F** measures how underserved a cell is based on its **current and historical RF admission** satisfaction (`allocated / offered`). Cells that have received a smaller fraction of their requested RF capacity get a higher fairness score. This is **not** delivered/offered after max-flow.
+**F** blends recent estimated delivered satisfaction (`delivered / offered`) with progress on this second's RF admission (`admitted / offered`). Cells that received a smaller fraction of their offered demand get a higher fairness score.
 
 ```text
 effective_sat = HISTORY_BLEND·hist + (1 − HISTORY_BLEND)·sat_now
@@ -61,12 +61,11 @@ F             = underservice / max_underservice   # if max_underservice > 0
 ```
 
 - If every cell has underservice ≈ 0 (`max_underservice ≤ 1e-12`), **F = 0 for all cells** (no fairness pressure; avoids divide-by-zero).
-- Cross-second history is an EMA in `<scale_dir>/scored_rf_history.json`
-- After each second: `hist ← HISTORY_EMA·hist + (1 − HISTORY_EMA)·sat_this_second`
+- After max-flow, the runner updates the EMA with this second's estimated delivered satisfaction and writes it to `<scale_dir>/t<second>/scored_rf_history.json`. The next snapshot reads that checkpoint.
 - Defaults: `HISTORY_EMA = 0.7`, `HISTORY_BLEND = 0.7`
 - β = 0 turns fairness off
 
-A cell can look fully served in **F** and still strand under gateway congestion. Report headline fairness from delivered-based metrics, not from this history alone.
+The runner estimates cell delivery by attributing each satellite's routed delivery proportionally to its admitted traffic from each cell.
 
 ### C — congestion
 
@@ -196,7 +195,7 @@ Defined in [`experiments/pr1_evaluation/methods.py`](experiments/pr1_evaluation/
 | `1` | **Equal RF** baseline | Policy `equal-rf`: ignore demand; round-robin channels | Simple demand-independent baseline used to evaluate whether more informed allocation decisions improve performance |
 | `2` | **Demand-proportional** baseline | Policy `demand-proportional`: split channels by terminal share | Demand-aware RF that still **ignores** gateway/ISL congestion |
 | `3` | Demand- and **gateway**-aware RF **without ISL** | `scored-rf`, β=0.3, γ=0.2, gateway **on**, ISL **off** | Ablation: score **C** using only direct feeder+GS residuals |
-| `4` | Demand- and **ISL**-aware RF **without local gateway scoring** | `scored-rf`, β=0.3, γ=0.2, gateway **off**, ISL **on** | Ablation: stress 1-hop ISL awareness (see note below) |
+| `4` | Demand- and **ISL**-aware RF **without gateway capacity scoring** | `scored-rf`, β=0.3, γ=0.2, gateway **off**, ISL **on** | Ablation: score one-hop ISL residuals |
 | `5` | Full coordination **without fairness** | `scored-rf`, β=**0**, γ=0.2, gateway+ISL **on** | Ablation: remove **F**; isolate demand + congestion |
 | `full` | **Proposed** policy | `scored-rf`, αD + βF − γC, β=0.3, γ=0.2, gateway+ISL **on** | Headline algorithm for the report |
 | `ablate-demand` | Demand only | `scored-rf`, β=0, γ=0 | Score ≈ αD only (no fairness, no congestion) |
@@ -206,8 +205,7 @@ Defined in [`experiments/pr1_evaluation/methods.py`](experiments/pr1_evaluation/
 **Method 4 / `USE_GATEWAY = False` (verified in `SharedEgress.best_egress`):**
 
 - Sats that **already have** a local feeder+GS get residual = ∞ → **C = 0** (no local gateway congestion penalty).
-- Sats **without** a local GS are scored on 1-hop ISL paths only. Those paths still use `min(ISL, neighbor feeder, neighbor GS residual)` — so Method 4 still needs a neighbor that can reach a gateway, and still accounts for that neighbor’s feeder/GS capacity when estimating ISL residual.
-- Disabling gateway awareness therefore means “do not penalize congestion on **direct** local feeder paths,” **not** “pretend gateways do not exist on ISL egress.”
+- A satellite without a local gateway is scored on the ISL residual to a neighbor with gateway reachability. Gateway and feeder capacity still constrain the final max-flow for every method.
 
 Aliases: `equal`, `demand`, `no-isl`, `no-gateway`, `no-fair`, `proposed`, `demand-only`, `cong-only`, `fair-only`.
 
@@ -253,12 +251,13 @@ Use this for plumbing checks and early comparisons. Do **not** treat smoke resul
 
 | Case | Runs | Scales | Intent |
 | --- | --- | --- | --- |
-| `uniform` | `10k-uniform` | isl=1, gw=1 | Uniform demand baseline |
+| `uniform` | `1k-uniform`, `10k-uniform` | isl=1, gw=1 | Light and heavy uniform demand |
+| `population` | `1k-pop`, `10k-pop` | isl=1, gw=1 | Light and heavy population-weighted demand |
 | `hotspot` | `10k-hotspot-pap` **and** `10k-hotspot-north` | isl=1, gw=1 | Sharp hotspots in two regions |
-| `wide` | `5k-wide-pap` **and** `5k-wide-north` | isl=1, gw=1 | Wider hotspots (more admit → more routing pressure) |
+| `wide` | `5k-wide-pap`, `5k-wide-north`, `5k-wide-south` | isl=1, gw=1 | Wide hotspots in three regions |
 | `shift` | `5k-wide-shift` | isl=1, gw=1 | Demand moves over simulated seconds |
-| `limited_gw` | `10k-uniform` + `5k-wide-pap` | isl=1, gw=**0.5 and 0.25** | Gateway scarcity (control + stressed demand) |
-| `limited_isl` | `10k-uniform` + `5k-wide-pap` | isl=**0.1**, gw=1 | ISL scarcity |
+| `limited_gw` | `1k-uniform`, `10k-uniform`, `5k-wide-pap` | isl=1, gw=0.75, 0.5, 0.25 | Gateway scarcity |
+| `limited_isl` | `10k-uniform`, `5k-wide-pap` | isl=0.5, 0.1, gw=1 | ISL scarcity |
 | `combined` | `5k-wide-pap` | isl=**0.1**, gw=**0.5** | Both bottlenecks at once |
 
 ### Example commands
@@ -310,7 +309,7 @@ Re-summarize without re-simulating (same `--method` / `--matrix` as the original
 
 ## 4. Preliminary evaluation findings
 
-Mean delivered throughput from early **smoke** comparisons of Equal-RF vs full scored-rf (demand + congestion + fairness). These are preliminary, not the full PR matrix:
+Mean delivered throughput from early smoke comparisons of Equal-RF vs full scored-rf. These runs predate delivered-service feedback and the revised ISL-only ablation.
 
 | Scenario | Equal-RF | Full scored-rf | Improvement |
 | --- | ---: | ---: | ---: |
@@ -318,7 +317,7 @@ Mean delivered throughput from early **smoke** comparisons of Equal-RF vs full s
 | Limited gateway | 461.6 Gbps | 498.3 Gbps | +8.0% |
 | Hotspot | 251.2 Gbps | 251.2 Gbps | 0% |
 
-Preliminary experiments show that scored-rf improves delivered throughput over equal-RF in the uniform and gateway-limited scenarios. Ablation testing indicates that **congestion awareness** accounts for most of these improvements, while **fairness** has little effect on throughput in the tested scenarios. The sharp hotspot scenario shows identical results across methods, suggesting an **RF admission bottleneck** that needs further investigation.
+In both sharp hotspot inputs, the five hotspot cells offer 800 Gbps and can admit at most 51.2 Gbps combined (eight 1.28 Gbps channels each). The other cells offer 200 Gbps. That gives an RF admission upper bound of 251.2 Gbps for these inputs, which the historical sharp-hotspot runs reached.
 
 ---
 
@@ -326,9 +325,9 @@ Preliminary experiments show that scored-rf improves delivered throughput over e
 
 Scored-rf is **implemented** and **preliminarily validated** on smoke tests (§4). The items below are a team checklist for Progress Report 2: what still needs evaluation, what limitations to discuss, and what we can already claim.
 
-**Already supportable (with caveats):** smoke-test throughput gains of ~7–8% over equal-RF in uniform and gateway-limited cases; congestion awareness as the main driver of those gains in the tested ablations; identical hotspot throughput across methods (cause still unverified).
+The historical smoke runs measured throughput gains of roughly 7–8% over equal RF in uniform and gateway-limited cases. Repeat the matched comparison for the current policy.
 
-**Not yet supportable:** universal superiority, fairness improving network fairness, a proven RF capacity ceiling at 251.2 Gbps, real-time feasibility, or latency improvements.
+Open evaluation questions include whether the updated policy reduces starvation under sustained contention and how allocation runtime scales with load.
 
 Priority legend: **Essential** for PR2 · **Important** · **Optional** (nice to have / deeper investigation)
 
@@ -336,10 +335,8 @@ Priority legend: **Essential** for PR2 · **Important** · **Optional** (nice to
 
 Do **not** treat these as requests to change the algorithm for PR2 unless investigation shows a clear bug. Document findings; algorithm changes are out of scope unless the team decides otherwise.
 
-1. **Investigate the hotspot RF bottleneck** — **Essential**
-   - Determine why the sharp hotspot scenario produces identical throughput across allocation methods.
-   - Check satellite visibility, interference constraints, available RF channels, and whether competing cells can actually receive additional allocations.
-   - Do **not** claim that 251.2 Gbps is a proven RF capacity ceiling until the limiting constraint is verified.
+1. **Contrast the sharp and wide hotspots** — **Essential**
+   - Use the sharp hotspots to show the RF admission ceiling and the wide hotspots to measure the effect of downstream capacity.
 
 2. **Expand evaluation beyond smoke tests** — **Essential**
    - Run or plan comparisons across uniform, population-weighted, sharp hotspot, wide hotspot, gateway-limited, ISL-limited, combined-congestion, and shifting-demand scenarios (see §3 matrices).
@@ -350,7 +347,7 @@ Do **not** treat these as requests to change the algorithm for PR2 unless invest
 3. **Evaluate historical fairness under resource contention** — **Important**
    - Smoke ablations suggest enabling fairness has little effect on **throughput**.
    - Test whether shifting demand and competition for limited RF channels produce meaningful differences in Jain’s fairness, starvation, or per-cell satisfaction.
-   - Always distinguish **RF allocation fairness** (what **F** uses) from **estimated delivered fairness** (what report metrics use).
+   - Report estimated delivered fairness and RF admission fairness separately.
 
 4. **Evaluate allocation runtime and scalability** — **Important**
    - Compare `allocation_s` across methods from saved metrics.
@@ -393,7 +390,7 @@ Write these up in the report even if we do not fix them before PR2. None of thes
 3. **Estimated per-cell fairness** — Discuss when reporting Jain / starvation
    - Aggregate delivered throughput comes from max-flow; per-cell delivered traffic is **estimated** via proportional attribution from satellite-level delivery.
    - Jain’s fairness and delivered starvation therefore use estimates, not exact per-cell flows.
-   - The score **F** itself uses historical **RF admission** satisfaction, not delivered satisfaction.
+   - The score **F** uses historical estimated delivered satisfaction and current RF admission progress.
 
 4. **Fairness component effectiveness** — Do not over-claim
    - Smoke ablations: congestion awareness drives throughput gains; fairness does not significantly change throughput in tested scenarios.

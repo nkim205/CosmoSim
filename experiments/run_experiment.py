@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT))
 from analysis.metrics import compute_run_metrics, write_run_metrics  # noqa: E402
 from experiments.results_log import LOG, log_experiment, short_scenario  # noqa: E402
 from spectrum_management.beam_mapping import NEW_POLICIES  # noqa: E402
+from spectrum_management.scored_rf import load_service_history, update_service_history  # noqa: E402
 from spectrum_management.validate_mapping import validate_mapping  # noqa: E402
 
 BUILTIN_POLICIES = ["greedy-coordinated", "greedy-uncoordinated"]
@@ -234,6 +235,7 @@ def run_unit(
     )
     weight_flags = gamma_flags + beta_flags + gw_aware_flags + isl_aware_flags
     capacity_aware = _policy_capacity_aware(policy)
+    uses_history = policy == "scored-rf" and scored_rf_beta != 0
 
     terminals = {l.split(",")[0]: int(l.split(",")[1]) for l in (TERMINALS / f"{tfile}.txt").read_text().split()}
     with_terminals = [c for c, v in terminals.items() if v > 0]
@@ -261,14 +263,12 @@ def run_unit(
         flows[2] = str(out)
         scale_flags = ["--isl-scale", str(isl), "--gw-scale", str(gw)] + weight_flags
         flows_s = 0.0
-        scale_dir = out.parent  # .../islX_gwY
-        history_path = scale_dir / "scored_rf_history.json"
+        previous_history = out.parent / f"t{t - 1}" / "scored_rf_history.json"
+        if uses_history:
+            scale_flags += ["--scored-rf-history", str(previous_history)]
 
         if capacity_aware:
             if not _beams_done(out, t):
-                # Fresh timeline at t=0: never reuse a previous experiment's history.
-                if t == 0 and history_path.exists():
-                    history_path.unlink()
                 flows_s = _run(
                     flows + scale_flags, out / "flows.log",
                     f"beam assignment for {short_scenario(scenario)}/{policy}/"
@@ -282,6 +282,9 @@ def run_unit(
                 for f in ("demands.txt", pkl, "flows.log"):
                     shutil.copyfile(shared_src / f, out / f)
                 (out / "flows.done").write_text(f"copied from {shared_src.relative_to(base)}\n")
+            runtime = shared_src / "allocation_runtime_s.txt"
+            if out != shared_src and runtime.exists():
+                shutil.copyfile(runtime, out / runtime.name)
             flows[2] = str(shared_src)
 
         mapping = pickle.loads((out / pkl).read_bytes())
@@ -313,8 +316,18 @@ def run_unit(
             )
             write_run_metrics(out, metrics, t_s=t)
             allocation_s = metrics.get("runtime_allocation_s")
-        except Exception as exc:  # metrics must not fail the experiment
+        except Exception as exc:
             (out / f"metrics_{t}.error").write_text(f"{exc}\n")
+            if uses_history:
+                raise
+        if uses_history:
+            if not metrics["per_cell_delivery_available"]:
+                raise RuntimeError(f"Missing routed flow for fairness history: {out}")
+            satisfaction = {
+                cell: row["satisfaction_delivered_estimated"] for cell, row in metrics["per_cell"].items()
+            }
+            history = update_service_history(load_service_history(previous_history), satisfaction)
+            (out / previous_history.name).write_text(json.dumps(history))
         rows.append({
             "experiment": name, "scenario": scenario, "terminal_file": tfile, "policy": policy, "t_s": t,
             "isl_scale": isl, "gw_scale": gw,
@@ -339,6 +352,10 @@ def main() -> None:
         sys.exit(f"{exp} already exists. Pick a new --name, --resume to continue it, or --overwrite to start over.")
     if exp.exists() and args.overwrite:
         shutil.rmtree(exp)
+    if args.resume and "scored-rf" in args.policies and (exp / "manifest.json").exists():
+        previous_manifest = json.loads((exp / "manifest.json").read_text())
+        if previous_manifest.get("scored_rf_history") != "delivered":
+            sys.exit("Use a new run name or --overwrite for scored-rf runs from before delivered-service feedback.")
     seconds = range(args.start, args.start + args.duration)
     missing = [s for s in args.scenarios
                if not (TERMINALS / f"{s}.txt").exists() and not (TERMINALS / f"{s}.schedule").exists()]
@@ -357,6 +374,7 @@ def main() -> None:
         "git_commit": git("rev-parse", "HEAD"), "git_branch": git("rev-parse", "--abbrev-ref", "HEAD"),
         "git_uncommitted_files": git("status", "--porcelain").splitlines(),
         "args": vars(args), "graph_dir": str(GRAPH_DIR.relative_to(ROOT)),
+        "scored_rf_history": "delivered",
         "terminal_sha256": {f: hashlib.sha256((TERMINALS / f"{f}.txt").read_bytes()).hexdigest() for f in used_files},
         "schedules": {s: schedule(s) for s in args.scenarios if schedule(s)},
     }

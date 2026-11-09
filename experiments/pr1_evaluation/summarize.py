@@ -19,6 +19,8 @@ HEADLINE = [
     "demand_satisfaction",  # delivered / requested (overall)
     "jain_d",
     "jain_a",
+    "mean_cell_sat_d",
+    "min_cell_sat_d",
     "starve_deliv",
     "starve_alloc",
     "cell_rf_fill",
@@ -45,9 +47,9 @@ def _safe_div(num: float, den: float) -> float:
 
 def enrich_breakdown(row: dict[str, Any]) -> dict[str, Any]:
     """Add RF admission / delivery efficiency / overall satisfaction fractions."""
-    req = float(row.get("requested_gbps") or float("nan"))
-    adm = float(row.get("admitted_gbps") or float("nan"))
-    deliv = float(row.get("delivered_gbps") or float("nan"))
+    req = row.get("requested_gbps")
+    adm = row.get("admitted_gbps")
+    deliv = row.get("delivered_gbps")
     row["rf_admission_rate"] = _safe_div(adm, req)          # admitted / offered
     row["delivery_efficiency"] = _safe_div(deliv, adm)       # delivered / admitted
     row["overall_satisfaction"] = _safe_div(deliv, req)      # delivered / offered (= demand_satisfaction)

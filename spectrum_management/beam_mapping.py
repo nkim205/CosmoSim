@@ -41,6 +41,9 @@ def beam_mapping(
     shell_satellite_indices: Sequence[Sequence[int]],
     users_per_channel: int,
     cell_population: Mapping[str, int],
+    *,
+    graph=None,
+    service_history: Mapping[str, float] | None = None,
 ) -> Dict[str, str]:
     """Dispatch beam mapping based on the requested policy."""
 
@@ -89,6 +92,7 @@ def beam_mapping(
                 cell_population,
             )
     elif normalized_policy in NEW_POLICIES:
+        scored_inputs = {"graph": graph, "history": service_history} if normalized_policy == "scored-rf" else {}
         mapping = NEW_POLICIES[normalized_policy](
             prepared_cells,
             sat_list,
@@ -98,6 +102,7 @@ def beam_mapping(
             shell_satellite_indices,
             users_per_channel,
             cell_population,
+            **scored_inputs,
         )
     else:
         raise ValueError(f"Unsupported beam-mapping policy '{policy}'. Expected one of: {', '.join(POLICY_NAMES)}.")

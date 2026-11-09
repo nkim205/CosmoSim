@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify scored-rf fairness: different service histories change allocations.
+"""Check scored-rf fairness and the ISL-only ablation on small inputs.
 
 Run from repo root:
   .venv/bin/python experiments/verify_scored_rf_fairness.py
@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 from collections import Counter
 from pathlib import Path
+
+import networkx as nx
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -67,10 +69,8 @@ def main() -> None:
     def run(history: dict[str, float], beta: float = 0.5) -> Counter:
         gv.scored_rf_beta = beta
         gv.scored_rf_gamma = 0.0
-        gv.scored_rf_history = dict(history)
-        gv.scored_rf_history_path = None
         mapping = sr.assign_beams(
-            prepared, sats, satellite_cells, cell_satellites, "test", SHELLS, 12, {}
+            prepared, sats, satellite_cells, cell_satellites, "test", SHELLS, 12, {}, history=history,
         )
         return Counter(key.rsplit("_", 1)[0] for key in mapping)
 
@@ -82,10 +82,37 @@ def main() -> None:
     assert counts_b[cell_b] > counts_b[cell_a]
     print("PASS: scarce-beam channel counts follow service history")
 
-    h1 = sr.update_service_history({}, {cell_a: 100}, {cell_a: 0})
-    h2 = sr.update_service_history(h1, {cell_a: 100}, {cell_a: 8})
+    h1 = sr.update_service_history({}, {cell_a: 0.0})
+    h2 = sr.update_service_history(h1, {cell_a: 1.0})
     assert h2[cell_a] > h1[cell_a]
-    print("PASS: history EMA update")
+    print("PASS: delivered service history update")
+
+    # Both serving satellites need an ISL to reach satellite 2's gateway.
+    graph = nx.DiGraph()
+    for sat, capacity in ((0, 100), (1, 1000)):
+        graph.add_edge(sat, 2, capacity=capacity)
+        graph.add_edge(2, sat, capacity=capacity)
+    graph.add_edge(3, 2, capacity=1000)
+    gv.scored_rf_beta = 0.0
+    gv.scored_rf_gamma = sr.GAMMA
+
+    def allocate(use_gateway: bool, use_isl: bool, gw_scale: float) -> int:
+        gv.scored_rf_use_gateway = use_gateway
+        gv.scored_rf_use_isl = use_isl
+        gv.gw_scale = gw_scale
+        mapping = sr.assign_beams(
+            [{"cell": cell_a, "num_terminals": 10}], [0, 1], {}, {cell_a: [0, 1]},
+            "test", [(0, 3)], 12, {}, graph=graph,
+        )
+        return int(mapping[f"{cell_a}_0"].split("_")[1])
+
+    without_isl = allocate(True, False, 1.0)
+    isl_only = allocate(False, True, 1.0)
+    assert isl_only == allocate(False, True, 0.0) == 1
+    assert sr.SharedEgress.from_graph(graph, 3).best_egress(0)[0] == 100
+    assert nx.maximum_flow_value(graph, 3, without_isl) == 100
+    assert nx.maximum_flow_value(graph, 3, isl_only) == 1000
+    print("PASS: ISL awareness picks the higher-throughput path independently of gateway scale")
     print("ALL PASS")
 
 
