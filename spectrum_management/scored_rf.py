@@ -21,9 +21,8 @@ Feeder/GS residuals are multiplied by ``global_vars.gw_scale`` and ISL residuals
 ``global_vars.isl_scale`` (both default to 1.0) so congestion matches
 ``generate_capacities_scaled`` stress scenarios.
 
-Cross-second fairness history is an EMA of per-cell satisfaction
-(allocated/offered), loaded/saved via ``global_vars.scored_rf_history_path``
-(typically ``<scale_dir>/scored_rf_history.json``).
+Cross-second fairness history is an EMA of estimated delivered/offered per cell,
+updated by the experiment runner after routing.
 
 Ablations (Methods 3-5) are the same loop with different flags/weights.
 """
@@ -31,7 +30,6 @@ Ablations (Methods 3-5) are the same loop with different flags/weights.
 from __future__ import annotations
 
 import json
-import pickle
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,10 +40,7 @@ from utils import global_variables as global_vars
 from .common import candidate_sats, initialize_beam_state
 from .constants import MAX_CHANNELS_PER_CELL
 from .greedy_coordinated import _order_satellites
-from .interference import check_interference
-
-ROOT = Path(__file__).resolve().parents[1]
-GRAPH_DIR = ROOT / "graph_generation" / "graphs_noglobal" / "starlink_5shells" / "haiti"
+from utils.h3_compat import k_ring
 
 # Weights from the project sketch.
 ALPHA = 0.5
@@ -112,8 +107,11 @@ class SharedEgress:
     @classmethod
     def from_graph(cls, graph, num_satellites: int) -> "SharedEgress":
         isl_scale, gw_scale = _capacity_scales()
-        feeder_cap = float(global_vars.sat_gs_max_capacity) * gw_scale
-        gs_cap = float(global_vars.ground_station_gsl_capacity) * gw_scale
+        feeder_cap = float("inf")
+        gs_cap = float("inf")
+        if _use_gateway():
+            feeder_cap = float(global_vars.sat_gs_max_capacity) * gw_scale
+            gs_cap = float(global_vars.ground_station_gsl_capacity) * gw_scale
         state = cls(isl_scale=isl_scale, gw_scale=gw_scale)
 
         sat_to_gs: Dict[int, List[int]] = defaultdict(list)
@@ -192,10 +190,8 @@ class SharedEgress:
             return local_res, local_path
         if use_isl:
             # Method 4: sats with local feeder are unconstrained on this axis.
-            if self.feeder.get(sat, 0.0) > 0 and self.sat_to_gs.get(sat):
-                gs_info = self._best_gs(sat)
-                gs = gs_info[0] if gs_info else None
-                return float("inf"), ("local", sat, gs)
+            if self.sat_to_gs.get(sat):
+                return float("inf"), None
             return isl_res, isl_path
         return float("inf"), None
 
@@ -289,18 +285,12 @@ def _contrib_to_sat(num_terminals: int, sats: Sequence[int], sat: int) -> float:
     return total
 
 
-def _load_graph():
-    t = int(getattr(global_vars, "current_simulation_time_s", 0))
-    path = GRAPH_DIR / f"graph_{t * 10**9}.txt"
-    with path.open("rb") as fh:
-        return pickle.load(fh)
-
-
-def _congestion(sat: int, additional_mbps: float, egress: SharedEgress) -> float:
+def _congestion(sat: int, additional_mbps: float, egress: SharedEgress, residual: Optional[float]) -> float:
     """C = 1 - min(1, residual / additional) using shared residuals."""
     if additional_mbps <= 0:
         return 0.0
-    residual, _ = egress.best_egress(sat)
+    if residual is None:
+        residual, _ = egress.best_egress(sat)
     if residual == float("inf"):
         return 0.0
     return 1.0 - min(1.0, max(0.0, residual) / additional_mbps)
@@ -313,53 +303,22 @@ def _satisfaction_this_second(num_terminals: int, num_channels: int) -> float:
     return min(1.0, _allocated_mbps(num_terminals, num_channels) / offered)
 
 
-def load_service_history(path: Optional[Path] = None) -> Dict[str, float]:
+def load_service_history(path: Optional[Path]) -> Dict[str, float]:
     """Load per-cell satisfaction EMA in [0, 1]. Missing cells default to 1.0 (no deficit)."""
-    override = getattr(global_vars, "scored_rf_history", None)
-    if isinstance(override, dict):
-        return {str(k): float(v) for k, v in override.items()}
-    hist_path = path
-    if hist_path is None:
-        raw = getattr(global_vars, "scored_rf_history_path", None)
-        if raw:
-            hist_path = Path(raw)
-    if hist_path is None or not hist_path.exists():
+    if path is None or not path.exists():
         return {}
-    with hist_path.open() as fh:
-        data = json.load(fh)
-    cells = data.get("satisfaction", data) if isinstance(data, dict) else {}
-    return {str(k): float(v) for k, v in cells.items()}
-
-
-def save_service_history(history: Mapping[str, float], path: Optional[Path] = None) -> None:
-    hist_path = path
-    if hist_path is None:
-        raw = getattr(global_vars, "scored_rf_history_path", None)
-        if raw:
-            hist_path = Path(raw)
-    if hist_path is None:
-        return
-    hist_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "satisfaction": {str(k): float(v) for k, v in history.items()},
-        "ema": HISTORY_EMA,
-    }
-    with hist_path.open("w") as fh:
-        json.dump(payload, fh, indent=2, sort_keys=True)
+    return json.loads(path.read_text())
 
 
 def update_service_history(
     history: Mapping[str, float],
-    terminals: Mapping[str, int],
-    cell_channels: Mapping[str, int],
+    delivered_satisfaction: Mapping[str, float],
 ) -> Dict[str, float]:
-    """EMA-update satisfaction from this second's allocated/offered per cell."""
-    ema = float(getattr(global_vars, "scored_rf_history_ema", HISTORY_EMA))
+    """Update active cells from this second's estimated delivered/offered."""
     out: Dict[str, float] = dict(history)
-    for cid, n_term in terminals.items():
-        sat_now = _satisfaction_this_second(n_term, int(cell_channels.get(cid, 0)))
+    for cid, sat_now in delivered_satisfaction.items():
         prior = float(out.get(cid, 1.0))
-        out[cid] = ema * prior + (1.0 - ema) * sat_now
+        out[cid] = HISTORY_EMA * prior + (1.0 - HISTORY_EMA) * min(1.0, max(0.0, sat_now))
     return out
 
 
@@ -392,11 +351,44 @@ def fairness_scores(
     return {cid: underservice[cid] / max_u for cid in terminals}
 
 
+class _InterferenceIndex:
+    """Incremental co-channel index local to one scored-RF allocation run.
+
+    Keeps exact existing interference semantics while avoiding repeated
+    string parsing, mapping scans, and H3 neighborhood calculations.
+    """
+
+    def __init__(self) -> None:
+        self.cell_channels: Dict[str, Set[int]] = defaultdict(set)
+        self.cell_sat_channels: Dict[str, Set[Tuple[int, int]]] = defaultdict(set)
+        self.neighbors: Dict[str, Set[str]] = {}
+
+    def feasible(self, cell: str, sat: int, beam_idx: int) -> bool:
+        # The original rule disallows this beam channel anywhere in this cell.
+        if beam_idx in self.cell_channels[cell]:
+            return False
+        neighbors = self.neighbors.get(cell)
+        if neighbors is None:
+            neighbors = set(k_ring(cell, 1))
+            self.neighbors[cell] = neighbors
+        # The original rule also disallows identical satellite/channel pairs
+        # in the cell's 1-ring (which includes the cell itself).
+        for neighbor in neighbors:
+            if (sat, beam_idx) in self.cell_sat_channels.get(neighbor, ()):
+                return False
+        return True
+
+    def add(self, cell: str, sat: int, beam_idx: int) -> None:
+        self.cell_channels[cell].add(beam_idx)
+        self.cell_sat_channels[cell].add((sat, beam_idx))
+
+
 def _find_assignment(
     cell_id: str,
     sat: int,
     mapping: Mapping[str, str],
     beams_available: Set[str],
+    interference_index: _InterferenceIndex,
 ) -> Optional[Tuple[str, str]]:
     """Return (dummy_key, beam_id) for the first feasible channel/color on this sat, else None."""
     for channel_idx in range(MAX_CHANNELS_PER_CELL):
@@ -405,7 +397,7 @@ def _find_assignment(
             continue
         for freq in range(global_vars.spatial_channel_reuse_factor):
             beam_id = f"{freq}_{sat}_{channel_idx}"
-            if beam_id in beams_available and check_interference(cell_id, mapping, beam_id):
+            if beam_id in beams_available and interference_index.feasible(cell_id, sat, channel_idx):
                 return dummy, beam_id
     return None
 
@@ -419,6 +411,9 @@ def assign_beams(
     shell_satellite_indices: Sequence[Sequence[int]],
     users_per_channel: int,
     cell_population: Mapping[str, int],
+    *,
+    graph=None,
+    history: Mapping[str, float] | None = None,
 ) -> Dict[str, str]:
     del satellite_cells, config, users_per_channel, cell_population
 
@@ -428,6 +423,7 @@ def assign_beams(
     terminals = {str(cell["cell"]): int(cell["num_terminals"]) for cell in prepared_cells}
     beams_available, sat_cells_assigned = initialize_beam_state(satellites)
     mapping: Dict[str, str] = {}
+    interference_index = _InterferenceIndex()
     cell_sats: Dict[str, List[int]] = {cid: [] for cid in terminals}
     sat_load: Dict[int, float] = defaultdict(float)
     num_shells = len(shell_satellite_indices)
@@ -436,11 +432,12 @@ def assign_beams(
     gamma = _gamma()
     beta = _beta()
     use_gw, use_isl = _use_gateway(), _use_isl()
-    history = load_service_history()
+    history = history or {}
 
     egress: Optional[SharedEgress] = None
     if gamma != 0 and (use_gw or use_isl):
-        graph = _load_graph()
+        if graph is None:
+            raise ValueError("scored-rf needs the current graph for congestion scoring")
         egress = SharedEgress.from_graph(graph, num_satellites)
 
     max_assignments = len(terminals) * MAX_CHANNELS_PER_CELL
@@ -452,13 +449,15 @@ def assign_beams(
 
         f_scores = fairness_scores(terminals, cell_sats, history) if beta != 0 else {}
         best: Optional[Tuple[float, str, int, str, str]] = None
+        # cache egress residuals per alloc iteration
+        egress_residual_cache: Dict[int, float] = {}
 
         for cell_id, n_term in terminals.items():
-            if unmet[cell_id] <= 0:
+            old_sats = cell_sats[cell_id]
+            if unmet[cell_id] <= 0 or len(old_sats) == MAX_CHANNELS_PER_CELL:
                 continue
             d_norm = unmet[cell_id] / max_unmet
             fairness = f_scores.get(cell_id, 0.0)
-            old_sats = cell_sats[cell_id]
             candidates = _order_satellites(
                 candidate_sats(cell_id, cell_satellites),
                 shell_satellite_indices,
@@ -466,7 +465,7 @@ def assign_beams(
                 num_shells,
             )
             for sat in candidates:
-                found = _find_assignment(cell_id, sat, mapping, beams_available)
+                found = _find_assignment(cell_id, sat, mapping, beams_available, interference_index)
                 if found is None:
                     continue
                 dummy, beam_id = found
@@ -474,8 +473,12 @@ def assign_beams(
                 additional = _contrib_to_sat(n_term, new_sats, sat) - _contrib_to_sat(n_term, old_sats, sat)
 
                 congestion = 0.0
-                if egress is not None and gamma != 0:
-                    congestion = _congestion(sat, additional, egress)
+                if egress is not None and gamma != 0 and additional > 0:
+                    if sat not in egress_residual_cache:
+                        residual, _ = egress.best_egress(sat)
+                        egress_residual_cache[sat] = residual
+
+                    congestion = _congestion(sat, additional, egress, residual=egress_residual_cache[sat],)
 
                 score = ALPHA * d_norm + beta * fairness - gamma * congestion
                 key = (score, unmet[cell_id], fairness, cell_id, -sat)
@@ -505,14 +508,9 @@ def assign_beams(
                 egress.set_sat_load(s, sat_load[s])
         cell_sats[cell_id] = new_sats
         mapping[dummy] = beam_id
+        interference_index.add(cell_id, sat, int(beam_id.rsplit("_", 1)[1]))
         beams_available.remove(beam_id)
         sat_cells_assigned.setdefault(sat, []).append(cell_id)
-
-    # Persist updated service history for the next simulated second.
-    channel_counts = {cid: len(sats) for cid, sats in cell_sats.items()}
-    new_history = update_service_history(history, terminals, channel_counts)
-    global_vars.scored_rf_history = new_history
-    save_service_history(new_history)
 
     isl_scale, gw_scale = (egress.isl_scale, egress.gw_scale) if egress is not None else _capacity_scales()
     print(

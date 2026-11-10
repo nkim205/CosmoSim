@@ -103,6 +103,16 @@ METHODS: dict[str, MethodSpec] = {
         use_isl=True,
         pr1_section="Proposed policy — αD + βF − γC",
     ),
+    "greedy-coordinated": MethodSpec(
+        key="greedy-coordinated",
+        title="Stock coordinated greedy",
+        policy="greedy-coordinated",
+    ),
+    "greedy-uncoordinated": MethodSpec(
+        key="greedy-uncoordinated",
+        title="Stock uncoordinated greedy",
+        policy="greedy-uncoordinated",
+    ),
     # Scoring-component ablations (same scored-rf loop; weights only).
     "ablate-demand": MethodSpec(
         key="ablate-demand",

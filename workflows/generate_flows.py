@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import exputil
 
 from spectrum_management.beam_mapping import POLICY_NAMES, beam_mapping
+from spectrum_management.scored_rf import load_service_history
 from utils.cells import read_cells
 from utils.ground_stations import read_ground_stations_extended
 from utils.tles import read_tles
@@ -102,6 +103,7 @@ def generate_flows(
     scored_rf_beta: float | None = None,
     scored_rf_use_gateway: bool | None = None,
     scored_rf_use_isl: bool | None = None,
+    scored_rf_history: Path | None = None,
 ) -> Path:
     output_dir = resolve_path(output_dir)
     graph_dir = resolve_path(graph_dir)
@@ -151,7 +153,7 @@ def generate_flows(
     for cell in cells:
         cell_id = cell["cell"]
         current_sats: List[int] = []
-        for sat in graph.predecessors(cell_id):
+        for sat in graph.predecessors(cell_id) if cell_id in graph else ():
             sat_neighbors = list(graph.predecessors(sat))
             if any(isinstance(neighbor_id, int) and neighbor_id < ut_base_index for neighbor_id in sat_neighbors):
                 current_sats.append(sat)
@@ -179,20 +181,7 @@ def generate_flows(
         global_vars.scored_rf_use_gateway = bool(scored_rf_use_gateway)
     if scored_rf_use_isl is not None:
         global_vars.scored_rf_use_isl = bool(scored_rf_use_isl)
-    # Cross-second fairness history for scored-rf (shared across t* under the same scale dir).
-    policy_norm = beam_policy.replace("_", "-").lower()
-    if policy_norm == "scored-rf" or policy_norm.startswith("scored-rf-"):
-        hist_path = output_dir.parent / "scored_rf_history.json"
-        global_vars.scored_rf_history_path = str(hist_path)
-        # Always reload from this scale dir's file (isolated per policy/scale; fresh process
-        # per second). Unit tests inject history by calling assign_beams directly.
-        if hist_path.exists():
-            with hist_path.open() as fh:
-                payload = json.load(fh)
-            satisfaction = payload.get("satisfaction", payload) if isinstance(payload, dict) else {}
-            global_vars.scored_rf_history = {str(k): float(v) for k, v in satisfaction.items()}
-        else:
-            global_vars.scored_rf_history = {}
+    service_history = load_service_history(scored_rf_history)
     # Wall time for the RF allocation / beam-mapping algorithm only (not graph I/O).
     alloc_t0 = time.perf_counter()
     mapping = beam_mapping(
@@ -205,6 +194,8 @@ def generate_flows(
         shell_ranges,
         users_per_channel,
         cell_population,
+        graph=graph,
+        service_history=service_history,
     )
     allocation_runtime_s = time.perf_counter() - alloc_t0
     (output_dir / "allocation_runtime_s.txt").write_text(f"{allocation_runtime_s:.6f}\n")
@@ -316,14 +307,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override scored-rf ISL congestion awareness (1/0). PR1 Methods 3/4.",
     )
+    parser.add_argument("--scored-rf-history", type=Path, help="Service history after the previous snapshot.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    # Avoid leaking history across sequential CLI invocations in the same process.
-    if hasattr(global_vars, "scored_rf_history"):
-        delattr(global_vars, "scored_rf_history")
     for attr in ("scored_rf_use_gateway", "scored_rf_use_isl", "scored_rf_gamma", "scored_rf_beta"):
         if hasattr(global_vars, attr):
             delattr(global_vars, attr)
@@ -343,6 +332,7 @@ def main() -> None:
         scored_rf_beta=args.scored_rf_beta,
         scored_rf_use_gateway=(None if args.scored_rf_use_gateway is None else bool(args.scored_rf_use_gateway)),
         scored_rf_use_isl=(None if args.scored_rf_use_isl is None else bool(args.scored_rf_use_isl)),
+        scored_rf_history=args.scored_rf_history,
     )
     print(f"Wrote demands to {demands_path}")
 

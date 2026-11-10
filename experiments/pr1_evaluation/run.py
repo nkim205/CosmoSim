@@ -20,7 +20,9 @@ import argparse
 import json
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime
+from itertools import product
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,11 +38,6 @@ from experiments.pr1_evaluation.summarize import (  # noqa: E402
     write_findings_stub,
 )
 from experiments.run_experiment import SCENARIOS  # noqa: E402
-
-# Reverse map: CosmoSim terminal-dir name -> short scenario key used by run_experiment.
-SCENARIO_DIR_TO_KEY = {v: k for k, v in SCENARIOS.items()}
-SCENARIO_KEY_TO_DIR = dict(SCENARIOS)
-
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -70,7 +67,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional subset of matrix case keys (e.g. uniform hotspot limited_gw).",
     )
     p.add_argument("--start", type=int, default=0)
-    p.add_argument("--duration", type=int, default=5, help="Seconds per case (default 5).")
+    p.add_argument("--duration", type=int, help="Seconds per case (default: 5 for smoke, through t=59 for PR1).")
     p.add_argument("--jobs", type=int, default=None)
     p.add_argument("--name", default=None, help="Experiment folder under data/runs/.")
     p.add_argument("--overwrite", action="store_true")
@@ -145,6 +142,10 @@ def main() -> None:
     method = resolve_method(args.method)
     matrix = resolve_matrix(args.matrix)
     cases = select_cases(matrix, args.cases)
+    if args.duration is None:
+        args.duration = 5 if args.matrix == "smoke" else 60 - args.start
+    if args.start < 0 or args.duration <= 0 or args.start + args.duration > 60:
+        sys.exit("Select a positive interval within snapshots 0–59.")
 
     exp_name = args.name or (
         f"pr1_m{method.key}_{args.matrix}_{datetime.now().strftime('%m%d-%H%M%S')}"
@@ -186,6 +187,12 @@ def main() -> None:
     print(f"  duration: {args.duration}s from t={args.start}")
     print(f"  output  : data/runs/{exp_name}")
 
+    manifest_path = exp_dir / "pr1_manifest.json"
+    if (args.resume or args.skip_run) and manifest_path.exists():
+        saved = json.loads(manifest_path.read_text())
+        if any(saved[key] != manifest[key] for key in ("method", "cases", "start_s", "duration_s")):
+            sys.exit("Method, cases or interval differ from the saved manifest. Use the original settings or a new name.")
+
     if not args.skip_run:
         # Case 0 creates data/runs/<name>/; later cases --resume into it.
         for i, case in enumerate(cases):
@@ -201,7 +208,7 @@ def main() -> None:
                 no_log=args.no_log,
             )
         exp_dir.mkdir(parents=True, exist_ok=True)
-        (exp_dir / "pr1_manifest.json").write_text(json.dumps(manifest, indent=2))
+        manifest_path.write_text(json.dumps(manifest, indent=2))
     elif not exp_dir.exists():
         sys.exit(f"--skip-run but missing {exp_dir}")
 
@@ -210,11 +217,24 @@ def main() -> None:
     write_summary_csv(exp_dir / "metrics_summary.csv", mrows)
     n_bad = sum(1 for r in mrows if r.get("consistency_ok") is False)
     print(f"  metrics_summary.csv: {len(mrows)} rows; consistency failures: {n_bad}")
+    seconds = range(args.start, args.start + args.duration)
+    expected = {
+        (SCENARIOS[scenario], isl, gw, t)
+        for case in cases
+        for scenario, isl, gw, t in product(case.scenarios, case.isl_scales, case.gw_scales, seconds)
+    }
+    actual = Counter(
+        (row["scenario"], float(row["isl_scale"]), float(row["gw_scale"]), row["t_s"])
+        for row in mrows if row["policy"] == method.policy
+    )
+    if actual != Counter(expected) or len(mrows) != len(expected):
+        missing = sorted(expected - actual.keys())
+        sys.exit(f"Incomplete or unexpected PR1 coverage. First missing snapshots: {missing[:3]}")
 
     case_rows = aggregate_rows_with_cases(
         load_metrics_summary(exp_dir) or [{k: str(v) for k, v in r.items()} for r in mrows],
         manifest["cases"],
-        SCENARIO_KEY_TO_DIR,
+        SCENARIOS,
     )
     write_case_summary(exp_dir / "pr1_case_summary.csv", case_rows)
     write_findings_stub(

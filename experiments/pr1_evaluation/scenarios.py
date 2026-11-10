@@ -34,7 +34,15 @@ PR1_MATRIX: dict[str, ScenarioCase] = {
         key="uniform",
         title="Uniform demand",
         pr1_tag="Uniform demand",
-        scenarios=("10k-uniform",),
+        scenarios=("1k-uniform", "10k-uniform"),
+        isl_scales=(1.0,),
+        gw_scales=(1.0,),
+    ),
+    "population": ScenarioCase(
+        key="population",
+        title="Population-weighted demand",
+        pr1_tag="Demand distribution",
+        scenarios=("1k-pop", "10k-pop"),
         isl_scales=(1.0,),
         gw_scales=(1.0,),
     ),
@@ -50,7 +58,7 @@ PR1_MATRIX: dict[str, ScenarioCase] = {
         key="wide",
         title="Wide demand hotspots",
         pr1_tag="Demand hotspots",
-        scenarios=("5k-wide-pap", "5k-wide-north"),
+        scenarios=("5k-wide-pap", "5k-wide-north", "5k-wide-south"),
         isl_scales=(1.0,),
         gw_scales=(1.0,),
     ),
@@ -66,17 +74,16 @@ PR1_MATRIX: dict[str, ScenarioCase] = {
         key="limited_gw",
         title="Limited gateway capacity",
         pr1_tag="Limited gateway capacity",
-        # Wide hotspot admits more traffic → GW stress shows; uniform included as control.
-        scenarios=("10k-uniform", "5k-wide-pap"),
+        scenarios=("1k-uniform", "10k-uniform", "5k-wide-pap"),
         isl_scales=(1.0,),
-        gw_scales=(0.5, 0.25),
+        gw_scales=(0.75, 0.5, 0.25),
     ),
     "limited_isl": ScenarioCase(
         key="limited_isl",
         title="Limited ISL capacity",
         pr1_tag="Limited ISL capacity",
         scenarios=("10k-uniform", "5k-wide-pap"),
-        isl_scales=(0.1,),
+        isl_scales=(0.5, 0.1),
         gw_scales=(1.0,),
     ),
     "combined": ScenarioCase(
@@ -91,7 +98,14 @@ PR1_MATRIX: dict[str, ScenarioCase] = {
 
 # Faster subset for plumbing checks.
 SMOKE_MATRIX: dict[str, ScenarioCase] = {
-    "uniform": PR1_MATRIX["uniform"],
+    "uniform": ScenarioCase(
+        key="uniform",
+        title="Uniform demand",
+        pr1_tag="Uniform demand",
+        scenarios=("10k-uniform",),
+        isl_scales=(1.0,),
+        gw_scales=(1.0,),
+    ),
     "hotspot": ScenarioCase(
         key="hotspot",
         title="Sharp demand hotspot (pap only)",
