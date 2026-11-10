@@ -49,6 +49,7 @@ ORDER = [PROPOSED] + BASELINES + ABLATIONS
 # Fixed colour per method (validated categorical palette, light mode), never by rank.
 COLOR = dict(zip(ORDER, ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]))
 MARKER = dict(zip(ORDER, ["o", "s", "^", "D", "v", "P", "X"]))  # secondary encoding
+DASH = {"M5: no fairness": (0, (4, 2))}  # M5 often overlaps Proposed exactly; dash it so both show
 
 SCENARIO_SHORT = {
     "cells_haiti_0_10000_uniform": "10k-uniform",
@@ -219,6 +220,7 @@ def vs_best(s: pd.DataFrame) -> pd.DataFrame:
             "proposed_vs_equal_pct": (100 * (p.delivered_gbps_mean / g.loc["Equal RF"].delivered_gbps_mean - 1)
                                       if "Equal RF" in g.index else np.nan),
             "n_seconds": int(g.n_seconds.min()),
+            "baselines_run": ", ".join(m for m in BASELINES if m in g.index),
         })
     return pd.DataFrame(rows)
 
@@ -339,7 +341,8 @@ def fig_cdf(cdf: pd.DataFrame, cases: list[str], out: Path):
             if not len(v):
                 continue
             used.add(m)
-            ax.step(v, np.arange(1, len(v) + 1) / len(v), where="post", color=COLOR.get(m, "#888"), linewidth=2)
+            ax.step(v, np.arange(1, len(v) + 1) / len(v), where="post", color=COLOR.get(m, "#888"), linewidth=2,
+                    linestyle=DASH.get(m, "-"))
         ax.set_xlim(0, 1.02)
         ax.set_ylim(0, 1.02)
         ax.set_title(case, fontsize=9)
@@ -359,17 +362,18 @@ def fig_timeseries(df: pd.DataFrame, case: str, out: Path):
     for m in ordered(g.method):
         h = g[g.method == m].sort_values("t_s")
         for ax, col in zip(axes, ["delivered_gbps", "jain_d"]):
-            ax.plot(h.t_s, h[col], color=COLOR.get(m, "#888"), linewidth=2, label=m)
+            ax.plot(h.t_s, h[col], color=COLOR.get(m, "#888"), linewidth=2, label=m, linestyle=DASH.get(m, "-"))
     style(axes[0], "Delivered (Gbps)")
     style(axes[1], "Jain's fairness (delivered)", "Simulated second")
-    for t0, lab in [(20, "hotspot moves Port-au-Prince → north"), (40, "→ south")]:
+    for t0, lab in [(20, "→ north"), (40, "→ south")]:
         if g.t_s.max() >= t0:
             for ax in axes:
                 ax.axvline(t0, color="#9a9994", linestyle=":", linewidth=1)
             axes[0].text(t0 + 0.3, 1.01, lab, fontsize=7, color="#52514e", va="bottom",
                          transform=axes[0].get_xaxis_transform())
     legend_below(fig, ordered(g.method))
-    fig.suptitle(f"{case}: throughput and fairness over time", fontsize=10, x=0.01, ha="left")
+    fig.suptitle(f"{case}: throughput and fairness over time (hotspot starts at Port-au-Prince)", fontsize=10,
+                 x=0.01, ha="left")
     fig.tight_layout(rect=(0, 0.07, 1, 0.95))
     save(fig, out, "fig4_shift_timeseries")
 
@@ -390,7 +394,9 @@ def fig_runtime(df: pd.DataFrame, out: Path):
                 color="#52514e")
     ax.set_yscale("log")
     ax.set_xticks(range(len(ms)))
-    wrap = {"Demand-proportional": "Demand-\nproportional", "Greedy-uncoordinated": "Greedy-\nuncoordinated"}
+    wrap = {"Demand-proportional": "Demand-\nproportional", "Greedy-uncoordinated": "Greedy-\nuncoordinated",
+            "M3: no ISL awareness": "M3: no ISL\nawareness", "M4: no gateway awareness": "M4: no\ngateway aware.",
+            "M5: no fairness": "M5: no\nfairness"}
     ax.set_xticklabels([wrap.get(m, m.replace(": ", ":\n").replace(" (", "\n(")) for m in ms], fontsize=7)
     style(ax, "Allocation time per second (s, log)")
     ax.set_title("Beam-allocation runtime per simulated second (bar = median)", fontsize=10, loc="left")
@@ -501,7 +507,8 @@ def main():
     cdf_cases = [c for c in ["5k-wide-shift", "5k-wide-pap · GW×0.5", "10k-uniform"] if c in set(s.case)][:2]
     fig_cdf(cells, cdf_cases, figs)
     fig_timeseries(df, "5k-wide-shift", figs)
-    lgw = sorted(c for c in s.case.unique() if "GW×" in c and s[s.case == c].method.isin(ABLATIONS).any())
+    lgw = sorted(c for c in s.case.unique() if "GW×" in c and not c.startswith("1k-")
+                 and s[s.case == c].method.isin(ABLATIONS).any())
     fig_bars(s, lgw, [PROPOSED] + ABLATIONS + ["Greedy-uncoordinated"], figs, "fig5_ablations",
              "Ablations under limited gateway capacity", ceil)
     fig_runtime(df, figs)
@@ -521,6 +528,10 @@ def main():
                  f"{r.delta_gbps:+.1f} | {r.delta_pct:+.1f}% | {r.proposed_vs_equal_pct:+.1f}% | "
                  f"{r.baseline_stranded:.1f}→{r.proposed_stranded:.1f} | {r.baseline_jain:.3f}→{r.proposed_jain:.3f} | "
                  f"{r.n_seconds} |")
+    partial = vb[vb.baselines_run.str.count(",") < len(BASELINES) - 1] if not vb.empty else vb
+    if not partial.empty:
+        L += ["\nNote: not every baseline ran in these cases, so 'best baseline' is best of those run: " +
+              "; ".join(f"{r.case} ({r.baselines_run})" for _, r in partial.iterrows())]
     if ceil:
         L += ["\n## RF admission ceilings (from terminal files)\n",
               "Sum over cells of min(terminals×100 Mbps, 8 channels × 1.28 Gbps). No allocator can admit more.\n"]
